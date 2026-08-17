@@ -1,0 +1,179 @@
+{
+  "id": 9,
+  "title": "Web Crawler",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 50,
+  "oneLine": "Drive fetching from a durable, prioritized, host-aware frontier; enforce robots and politeness, deduplicate URLs and content, and make every stage resumable.",
+  "opening": "The core is a durable URL frontier, not just a pool of HTTP workers. Seed URLs enter a normalized seen-set and a prioritized frontier. A scheduler separates global priority from per-host queues so we respect robots.txt and politeness delays while keeping workers busy. Fetchers use cached DNS, deadlines, size/type limits, and conditional requests. Parsed pages are content-hashed to remove duplicates, persisted, and passed to an extractor that normalizes and filters new links before they re-enter the frontier. I would partition primarily by host/domain so one scheduler owns politeness for that host, checkpoint every stage, and track freshness, crawl budget, trap detection, and fetch outcomes.",
+  "ask": [
+    "Is the goal search indexing, archival, monitoring, or a focused domain crawl?",
+    "How many pages, how fresh, and which content types/languages?",
+    "Must JavaScript-rendered pages be supported?",
+    "What legal/robots/politeness and per-site budget rules apply?"
+  ],
+  "requirements": {
+    "functional": [
+      "Discover and fetch pages",
+      "Parse and extract links",
+      "Deduplicate URLs/content",
+      "Refresh existing pages"
+    ],
+    "nonFunctional": [
+      "Politeness",
+      "Horizontal scale",
+      "Fault tolerance",
+      "Freshness",
+      "Bounded resource usage"
+    ]
+  },
+  "scale": [
+    "Average fetch rate is target pages ÷ crawl interval; bandwidth usually dominates before CPU parsing.",
+    "Partition by host to serialize host-level politeness while running many hosts concurrently.",
+    "The seen set may reach billions of URLs; use durable partitioned storage plus Bloom filters as an optimization, not the only source of truth."
+  ],
+  "flows": [
+    {
+      "name": "Discovery and fetch",
+      "nodes": [
+        "Seeds",
+        "URL normalize/filter",
+        "Seen set",
+        "Priority frontier",
+        "Host scheduler",
+        "DNS + downloader"
+      ]
+    },
+    {
+      "name": "Processing",
+      "nodes": [
+        "Fetched bytes",
+        "Parser",
+        "Content hash/dedupe",
+        "Object store/index",
+        "Link extractor",
+        "New URL frontier"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Frontier scheduling",
+      "default": "Front queues for priority/freshness and back queues per host for politeness.",
+      "why": "A single FIFO cannot balance importance with per-site rate limits.",
+      "switch": "Specialized crawls can use topic/domain-specific queues and explicit customer SLAs."
+    },
+    {
+      "topic": "Partition key",
+      "default": "Hash by host/domain for scheduling ownership.",
+      "why": "It centralizes robots and next-allowed-fetch state for each site.",
+      "switch": "Very large hosts may require controlled subpartitioning with a shared token budget."
+    },
+    {
+      "topic": "Rendering",
+      "default": "Fetch static HTML by default; send selected pages to a sandboxed browser-render queue.",
+      "why": "Headless rendering is expensive and vulnerable to hostile scripts.",
+      "switch": "Render all pages only for narrow, high-value domains where dynamic content is essential."
+    },
+    {
+      "topic": "Freshness",
+      "default": "Adapt revisit interval from change frequency, importance, and HTTP cache headers.",
+      "why": "Uniform recrawl wastes bandwidth on static pages and misses fast-changing ones.",
+      "switch": "Event/webhook feeds can replace polling for cooperative sources."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "URL normalization",
+      "points": [
+        "Canonicalize scheme/host, remove fragments, normalize default ports, and treat query rules carefully.",
+        "Respect canonical tags but do not trust them blindly.",
+        "Avoid collapsing distinct signed or order-sensitive URLs."
+      ]
+    },
+    {
+      "title": "Politeness and robots",
+      "points": [
+        "Cache robots.txt with expiry and fail conservatively according to policy.",
+        "Maintain per-host next-fetch time and concurrent-connection limit.",
+        "Identify the crawler honestly and provide contact/takedown mechanisms."
+      ]
+    },
+    {
+      "title": "Trap defense",
+      "points": [
+        "Cap URL length, path depth, calendar patterns, duplicate parameter combinations, and pages per host.",
+        "Detect near-duplicate content and infinite generated spaces.",
+        "Sandbox parsers/renderers and enforce byte/time/memory limits."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Spider trap creates infinite URLs",
+      "response": "Per-host budget, pattern detectors, depth/parameter caps, and operator quarantine."
+    },
+    {
+      "risk": "One host overwhelms workers",
+      "response": "Host queues and token budgets; fairness scheduler across domains."
+    },
+    {
+      "risk": "Frontier or worker crashes",
+      "response": "Durable leases with visibility timeout, idempotent fetch records, checkpoints, and retry classes."
+    },
+    {
+      "risk": "DNS or origin instability",
+      "response": "DNS cache with TTL, exponential backoff, circuit state per host, and conditional retries by status class."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Is crawling BFS?",
+      "a": "Conceptually discovery can look breadth-first, but production scheduling is priority- and politeness-driven. Important/fresh URLs and host budgets matter more than strict graph depth."
+    },
+    {
+      "q": "How do you deduplicate content?",
+      "a": "Hash normalized bytes for exact duplicates and use locality-sensitive fingerprints such as SimHash/MinHash for near duplicates. Keep canonical/source relationships for indexing."
+    },
+    {
+      "q": "How do you guarantee each URL is fetched once?",
+      "a": "Usually you do not need a global exactly-once guarantee. Use at-least-once leases and idempotent storage; duplicate fetches are cheaper than distributed coordination over every URL."
+    },
+    {
+      "q": "How do you scale one huge domain?",
+      "a": "Split paths across workers but keep a shared host-level rate budget and robots policy. A coordinator or distributed token bucket prevents aggregate politeness violations."
+    }
+  ],
+  "mistakes": [
+    "Describing only worker threads and no frontier",
+    "Ignoring robots.txt and per-host politeness",
+    "Using Bloom filters as authoritative dedupe despite false positives",
+    "Rendering arbitrary JavaScript without sandbox/resource limits"
+  ],
+  "seniorSignal": "Focus on scheduling fairness, crawl budget, legal/politeness controls, resumability, and hostile-input isolation—not merely HTTP throughput.",
+  "implementation": [
+    "Kafka/Pulsar partitions for durable frontier stages, with a host-aware scheduler",
+    "RocksDB/Cassandra seen set plus Bloom filters",
+    "Object storage for raw content; parser/index pipeline downstream",
+    "Playwright/Chromium workers in strict sandbox for selected dynamic pages"
+  ],
+  "related": [
+    4,
+    5,
+    6,
+    19,
+    20,
+    24
+  ],
+  "tags": [
+    "frontier",
+    "robots.txt",
+    "politeness",
+    "dedupe",
+    "scheduler",
+    "crawler"
+  ],
+  "repoTitle": "Web Crawler",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/09.%20Web%20Crawler"
+}
