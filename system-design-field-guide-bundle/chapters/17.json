@@ -1,0 +1,181 @@
+{
+  "id": 17,
+  "title": "Nearby Friends",
+  "category": "Geo & Realtime",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 55,
+  "oneLine": "Treat location as expiring soft state, maintain WebSocket connections, and fan location updates only to authorized online friends through partitioned pub/sub.",
+  "opening": "Unlike a business proximity index, friend locations are highly dynamic and privacy-sensitive. Mobile clients periodically send coarse location updates over a persistent connection or API. A location service validates consent and precision, stores the latest location with a short TTL, and publishes an update keyed by user. Each connected user’s gateway or nearby service subscribes only to authorized online friends, computes exact distance, and pushes enter/leave/update events. Connection and topic ownership are partitioned by user ID, with service discovery mapping users to gateways and pub/sub shards. The system is eventually consistent by design; stale locations expire automatically. I would make opt-in, invisible mode, block lists, precision reduction, audit, and abuse controls first-class rather than treating location as ordinary profile data.",
+  "ask": [
+    "Friends only, mutual friends, or any nearby users?",
+    "What distance, accuracy, update frequency, and battery budget?",
+    "What privacy modes and block/visibility rules apply?",
+    "Do we need history, or only current expiring location?"
+  ],
+  "requirements": {
+    "functional": [
+      "Publish current location",
+      "Find/push nearby authorized friends",
+      "Presence/online status",
+      "Privacy controls"
+    ],
+    "nonFunctional": [
+      "Realtime-ish updates",
+      "High connection scale",
+      "Battery efficiency",
+      "Privacy/security",
+      "Graceful staleness"
+    ]
+  },
+  "scale": [
+    "Model location updates separately from socket count: 100M active users updating every 30 seconds is about 3.3M updates/s.",
+    "Fanout = update rate × online authorized friends; filter subscriptions aggressively rather than broadcasting spatially to everyone.",
+    "Location TTL should exceed a few missed updates but be short enough that offline users disappear safely."
+  ],
+  "flows": [
+    {
+      "name": "Location update",
+      "nodes": [
+        "Mobile client",
+        "Gateway",
+        "Consent/precision policy",
+        "Latest-location store TTL",
+        "User topic",
+        "Authorized friend subscribers",
+        "Distance filter",
+        "Push update"
+      ]
+    },
+    {
+      "name": "Connection",
+      "nodes": [
+        "Login",
+        "WebSocket gateway",
+        "Device registry",
+        "Friend graph",
+        "Subscribe topics",
+        "Heartbeat / expiry"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Fanout model",
+      "default": "User-topic pub/sub to online authorized friends.",
+      "why": "A typical user has a bounded friend set; it avoids publishing every location into public spatial cells.",
+      "switch": "For ‘people nearby’ discovery, use geohash/S2 cell topics with strict privacy and aggregation."
+    },
+    {
+      "topic": "Location storage",
+      "default": "Redis-like expiring latest state; append history only if explicitly required.",
+      "why": "Current location is soft state and automatic expiry prevents indefinite stale visibility.",
+      "switch": "Durable encrypted history requires a separate retention/legal design."
+    },
+    {
+      "topic": "Update cadence",
+      "default": "Adaptive client cadence based on movement, app state, and battery.",
+      "why": "Fixed high-frequency GPS updates waste battery and backend capacity.",
+      "switch": "Higher frequency for explicit live-sharing sessions with time-limited consent."
+    },
+    {
+      "topic": "Distance computation",
+      "default": "Compute exact distance after authorization, with coarse cells only for candidate reduction if needed.",
+      "why": "Privacy filtering must precede disclosure and cell membership is approximate.",
+      "switch": "Do calculations on device for stronger privacy where product flow permits."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Subscription management",
+      "points": [
+        "On login, fetch authorized online-friend set and subscribe in batches.",
+        "Process follow/block/privacy changes as events that add/remove subscriptions immediately.",
+        "For whale users, cap subscriptions and use pull or hierarchical fanout."
+      ]
+    },
+    {
+      "title": "Gateway scaling",
+      "points": [
+        "Shard users by consistent hashing; keep device registry with TTL and topology epoch.",
+        "Drain gateways by stopping new connections and forcing jittered reconnect.",
+        "Delivery is best effort; reconnect fetches current location snapshot rather than replaying every movement."
+      ]
+    },
+    {
+      "title": "Privacy engineering",
+      "points": [
+        "Reduce coordinate precision and show distance bands rather than raw coordinates.",
+        "Prevent background location collection outside active consent.",
+        "Rate-limit lookups and detect stalking/scraping patterns."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "User goes offline but remains visible",
+      "response": "Short TTL, heartbeat expiry, and client-side ‘last updated’ display/threshold."
+    },
+    {
+      "risk": "Block/privacy change races with update",
+      "response": "Authorize again before delivery, version policies, remove subscriptions immediately, and reject stale policy epochs."
+    },
+    {
+      "risk": "Pub/sub shard fails",
+      "response": "Rebuild subscriptions from friend graph/device registry; current-state snapshot makes lost transient updates acceptable."
+    },
+    {
+      "risk": "Celebrity/whale user has millions of followers",
+      "response": "Do not model as ordinary friend fanout; cap product semantics, use pull/cell aggregation, or dedicated topic hierarchy."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why not store every update durably?",
+      "a": "The product needs current proximity, not an audit trail. Durable high-frequency history is expensive and creates significant privacy risk. Keep only TTL state unless history is an explicit requirement."
+    },
+    {
+      "q": "How do you know which gateway holds a friend?",
+      "a": "A device registry maps user/device to gateway with TTL and topology epoch. The pub/sub layer may deliver directly to the owning gateway or through a user topic."
+    },
+    {
+      "q": "How do you handle GPS jitter around the radius boundary?",
+      "a": "Use hysteresis—different enter and leave thresholds—plus minimum dwell time and accuracy radius, so users do not flap in and out."
+    },
+    {
+      "q": "Could geohash replace friend subscriptions?",
+      "a": "It can find spatial candidates, but it exposes more users to shared location topics and then requires heavy authorization filtering. For bounded friend graphs, per-user subscriptions are usually safer and cheaper."
+    }
+  ],
+  "mistakes": [
+    "Ignoring consent and block semantics",
+    "Persisting precise location indefinitely by default",
+    "Broadcasting updates to all users in a cell",
+    "Using one fixed update interval regardless of movement/battery"
+  ],
+  "seniorSignal": "Treat privacy as a system invariant. Explain soft-state expiry, authorization-before-delivery, adaptive sampling, reconnect semantics, and how you avoid fanout abuse.",
+  "implementation": [
+    "WebSocket gateways with Redis TTL device/location state",
+    "Kafka/Redis Streams or a pub/sub fabric partitioned by user ID",
+    "Graph cache for friends/blocks and policy versions",
+    "Mobile geofencing/motion APIs to reduce update rate"
+  ],
+  "related": [
+    5,
+    12,
+    16,
+    18,
+    19,
+    20
+  ],
+  "tags": [
+    "location",
+    "WebSocket",
+    "pub/sub",
+    "privacy",
+    "TTL",
+    "presence"
+  ],
+  "repoTitle": "Nearby Friends",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/17.%20Nearby%20Friends"
+}
