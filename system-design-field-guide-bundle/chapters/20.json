@@ -1,0 +1,182 @@
+{
+  "id": 20,
+  "title": "Metrics Monitoring and Alerting",
+  "category": "Storage & Messaging",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 55,
+  "oneLine": "Collect labeled time series, control cardinality, store compressed samples by time, query through downsampled tiers, and alert on SLO impact rather than every noisy spike.",
+  "opening": "I would separate collection, ingestion, time-series storage, query, and alerting. Services expose metrics for pull-based collection where possible; agents or gateways accept push for short-lived jobs and external environments. Collectors discover targets, scrape in parallel, apply relabeling/cardinality limits, and route series by a stable hash of metric plus labels to replicated ingestion shards. Samples are buffered in a WAL, compressed into time blocks, indexed by labels, and downsampled into longer-retention tiers. The query layer fans out by time/series and caches common dashboards. Alert rules run independently, group and deduplicate incidents, support silences, and use multi-window burn-rate checks for SLOs. Raw high-cardinality events belong in logs/traces, not metrics.",
+  "ask": [
+    "Infrastructure/application/business metrics—and are logs/traces out of scope?",
+    "How many active series, samples/sec, labels, and retention tiers?",
+    "Pull, push, or mixed environments?",
+    "What alert latency, availability, and query patterns?"
+  ],
+  "requirements": {
+    "functional": [
+      "Collect metrics",
+      "Store/query time series",
+      "Dashboards",
+      "Rule evaluation/notifications"
+    ],
+    "nonFunctional": [
+      "Massive write throughput",
+      "Efficient compression",
+      "High availability",
+      "Controlled cardinality",
+      "Reliable alerting"
+    ]
+  },
+  "scale": [
+    "Active series = metric names × unique label combinations; cardinality can explode before sample QPS looks large.",
+    "Retention example: raw 7 days, 1-minute 30 days, hourly one year—derive from use cases and cost.",
+    "Compression is effective because timestamps and values are delta-encoded within a series."
+  ],
+  "flows": [
+    {
+      "name": "Ingest",
+      "nodes": [
+        "Targets/agents",
+        "Discovery",
+        "Collectors",
+        "Relabel/cardinality guard",
+        "Hash router",
+        "WAL + ingest shards",
+        "Time blocks/object store"
+      ]
+    },
+    {
+      "name": "Query/alert",
+      "nodes": [
+        "Dashboard/rule",
+        "Query frontend",
+        "Cache",
+        "Series index",
+        "Block fanout",
+        "Aggregate",
+        "Alert grouping/router"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Pull or push",
+      "default": "Pull for long-lived services; push gateway/agent for short-lived or inaccessible targets.",
+      "why": "Pull centralizes scheduling, target health, and backpressure.",
+      "switch": "Pure push for edge/IoT where inbound connectivity is impossible, with strict tenant quotas."
+    },
+    {
+      "topic": "Series sharding",
+      "default": "Hash full label set so all samples for a series reach one ingest owner/replica set.",
+      "why": "It enables ordered compression and avoids cross-shard writes for one series.",
+      "switch": "Query layer must fan out across shards for broad aggregations."
+    },
+    {
+      "topic": "Alert philosophy",
+      "default": "Alert on symptoms/SLO burn and actionable saturation; ticket low-urgency causes.",
+      "why": "Thresholding every metric creates fatigue and hides real incidents.",
+      "switch": "Hard invariant/security alerts may page immediately independent of SLO."
+    },
+    {
+      "topic": "Retention",
+      "default": "Raw hot blocks, downsampled warm tiers, object-store cold retention.",
+      "why": "Most long-range queries do not need per-second resolution.",
+      "switch": "Keep immutable raw samples longer for regulated evidence only when justified."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Cardinality governance",
+      "points": [
+        "Never use unbounded user/order/request IDs as labels.",
+        "Set per-tenant series budgets and reject/drop with visible telemetry.",
+        "Provide top-cardinality diagnostics and label allowlists."
+      ]
+    },
+    {
+      "title": "Alert lifecycle",
+      "points": [
+        "Rule evaluation produces instances; group related labels, dedupe repeats, inhibit downstream symptoms, and honor silences.",
+        "Persist state so restarts do not resend every alert.",
+        "Multi-window burn rate catches both fast and slow SLO consumption."
+      ]
+    },
+    {
+      "title": "High availability",
+      "points": [
+        "Scrape with controlled replicas and deduplicate samples or partition target ownership.",
+        "Replicate WAL/blocks and keep alert evaluators redundant with ownership leases.",
+        "Monitoring its own failure requires an independent dead-man signal."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Label cardinality explosion",
+      "response": "Admission guard, quotas, relabel/drop rules, emergency denylist, and identify offending deployment."
+    },
+    {
+      "risk": "Collector falls behind",
+      "response": "Bound scrape concurrency, drop/skip stale cycles explicitly, scale by target ownership, and expose scrape age."
+    },
+    {
+      "risk": "Alert storm during outage",
+      "response": "Grouping, dedupe, inhibition, rate limits, incident aggregation, and escalation policy."
+    },
+    {
+      "risk": "Monitoring backend outage hides production outage",
+      "response": "Replicated control/data plane, local buffering, external synthetic checks, and dead-man alert through an independent channel."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why are user IDs bad metric labels?",
+      "a": "They create one time series per user, exploding index/memory and query cost. Put high-cardinality identity in logs/traces and aggregate metrics by bounded dimensions."
+    },
+    {
+      "q": "How do you store time series efficiently?",
+      "a": "Group samples by series and time block, delta-encode timestamps/values, write compressed immutable blocks, keep a label index, and compact/downsample older data."
+    },
+    {
+      "q": "What is a burn-rate alert?",
+      "a": "It compares current error-budget consumption to the rate that would exhaust the budget. Pair a fast window with a longer confirmation window to catch severe and sustained failures with fewer false pages."
+    },
+    {
+      "q": "How do you avoid duplicate samples from HA collectors?",
+      "a": "Assign exclusive target ownership with leases or ingest replicas carrying replica labels and deduplicate by timestamp/series at query/compaction."
+    }
+  ],
+  "mistakes": [
+    "Treating metrics, logs, and traces as interchangeable",
+    "Allowing unbounded labels",
+    "Paging on every CPU threshold",
+    "Building monitoring with no independent liveness check"
+  ],
+  "seniorSignal": "Lead with cardinality economics and alert quality. Explain the write-optimized TSDB path, retention/downsampling, HA semantics, and why observability must degrade predictably.",
+  "implementation": [
+    "OpenTelemetry/Prometheus collection; service discovery and relabeling",
+    "WAL + compressed time blocks, with object-store long-term backend",
+    "PromQL-like query frontend and cache",
+    "Alertmanager-style grouping, inhibition, silence, and multi-window SLO rules"
+  ],
+  "related": [
+    1,
+    2,
+    5,
+    6,
+    19,
+    21,
+    28
+  ],
+  "tags": [
+    "time series",
+    "Prometheus",
+    "cardinality",
+    "alerting",
+    "SLO",
+    "downsampling"
+  ],
+  "repoTitle": "Metrics Monitoring and Alerting System",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/20.%20Metrics%20Monitoring%20and%20Alerting%20System"
+}
