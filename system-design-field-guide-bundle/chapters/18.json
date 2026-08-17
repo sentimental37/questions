@@ -1,0 +1,192 @@
+{
+  "id": 18,
+  "title": "Google Maps",
+  "category": "Geo & Realtime",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 60,
+  "oneLine": "Serve immutable map/vector tiles through CDN, geocode via a dedicated index, and compute routes over a hierarchically partitioned road graph enriched by live traffic events.",
+  "opening": "I would split map rendering, geocoding, location telemetry, and routing because they have different data and latency profiles. Static/vector map tiles are generated offline, versioned, and served globally through CDN. Geocoding uses a text/address index plus spatial data. The routing service stores the road network as a weighted graph partitioned into hierarchical tiles; it loads a local corridor and uses A* or contraction/hierarchical shortcuts rather than scanning the whole graph. Device location updates are sampled and batched into a Kafka pipeline to derive traffic speeds and incidents. A route request resolves endpoints, obtains candidate paths, applies current edge weights and restrictions, ranks ETA, and returns route geometry plus navigation steps. During navigation, location updates trigger adaptive rerouting only when the route is materially degraded.",
+  "ask": [
+    "Map display, geocoding, routing/navigation, live traffic—or which subset?",
+    "Driving only or multiple travel modes and constraints?",
+    "Global coverage and offline maps?",
+    "How fresh must traffic/closures and ETA be?"
+  ],
+  "requirements": {
+    "functional": [
+      "Render maps",
+      "Geocode/search places",
+      "Compute route/ETA",
+      "Navigation/reroute",
+      "Traffic updates"
+    ],
+    "nonFunctional": [
+      "Low latency",
+      "Global availability",
+      "Fresh traffic",
+      "Spatial accuracy",
+      "Cost-efficient tile delivery"
+    ]
+  },
+  "scale": [
+    "Tile traffic is huge but cacheable; route requests are lower volume and CPU/memory intensive.",
+    "Road graphs contain millions/billions of edges, so hierarchical preprocessing is required for fast routes.",
+    "Location telemetry should be sampled, anonymized/aggregated, and processed asynchronously."
+  ],
+  "flows": [
+    {
+      "name": "Map rendering",
+      "nodes": [
+        "Client viewport",
+        "Tile coordinates/zoom",
+        "CDN",
+        "Versioned vector tiles",
+        "Render locally"
+      ]
+    },
+    {
+      "name": "Routing",
+      "nodes": [
+        "Origin/destination",
+        "Geocoder/snap to road",
+        "Graph tile loader",
+        "A* / hierarchy",
+        "Traffic weights",
+        "Route ranker",
+        "Geometry + ETA"
+      ]
+    },
+    {
+      "name": "Traffic",
+      "nodes": [
+        "Device probes",
+        "Batch/privacy filter",
+        "Kafka",
+        "Map-match",
+        "Speed aggregation",
+        "Traffic edge store",
+        "Route weight updates"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Raster or vector tiles",
+      "default": "Vector tiles for client styling, smaller multi-zoom reuse, and richer interaction.",
+      "why": "They reduce server-render variants and support smooth rotation/zoom.",
+      "switch": "Raster tiles are simpler for static imagery or weak clients."
+    },
+    {
+      "topic": "Routing algorithm",
+      "default": "A* plus hierarchical partitioning/contraction and precomputed shortcuts.",
+      "why": "Plain Dijkstra across the global graph is too slow.",
+      "switch": "Specialized multi-criteria algorithms for transit, tolls, EV charging, or time-dependent restrictions."
+    },
+    {
+      "topic": "Traffic update model",
+      "default": "Stream aggregates into an overlay of edge weights, keeping base graph immutable/versioned.",
+      "why": "Road topology changes slowly; traffic changes continuously.",
+      "switch": "Major closures may require immediate control-plane invalidation and route exclusion."
+    },
+    {
+      "topic": "Rerouting",
+      "default": "Trigger only on meaningful ETA/route deviation with cooldown/hysteresis.",
+      "why": "Continuous rerouting causes instability and compute spikes.",
+      "switch": "Safety closures override cooldown immediately."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Graph partitioning",
+      "points": [
+        "Partition roads into tiles with boundary nodes and higher-level shortcuts.",
+        "Route planner loads a corridor, then refines local segments.",
+        "Version graph/tile sets so a route is computed consistently across updates."
+      ]
+    },
+    {
+      "title": "Map matching",
+      "points": [
+        "Raw GPS is noisy; infer likely road segment using position, heading, speed, and history.",
+        "Use confidence thresholds before contributing a probe to traffic.",
+        "Hysteresis prevents bouncing between parallel roads."
+      ]
+    },
+    {
+      "title": "Offline maps",
+      "points": [
+        "Package signed regional tile/graph bundles with version manifests and deltas.",
+        "Keep routing subset local; reconcile traffic when connected.",
+        "Respect storage limits and map-license constraints."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "CDN cannot fetch tile origin",
+      "response": "Long-lived immutable tile versions, multi-origin replication, and stale-while-revalidate."
+    },
+    {
+      "risk": "Traffic pipeline lags",
+      "response": "Route with baseline historical speeds, show reduced freshness, and alarm on edge-weight age."
+    },
+    {
+      "risk": "Graph versions mix",
+      "response": "Request pins a graph release/version; tile loaders reject incompatible data."
+    },
+    {
+      "risk": "GPS tunnel/dropout",
+      "response": "Dead reckoning and route projection with confidence; recover on next reliable fix."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why not store the road graph in a normal relational database and query it?",
+      "a": "The hot operation is graph traversal over adjacent edges with predictable memory access. Preprocessed graph tiles in memory/object artifacts are much faster; relational storage remains useful for source/edit workflows."
+    },
+    {
+      "q": "How does A* improve Dijkstra?",
+      "a": "It prioritizes nodes using cost-so-far plus an admissible heuristic, such as straight-line distance, reducing explored space while preserving optimality if the heuristic does not overestimate."
+    },
+    {
+      "q": "How do live traffic and historical traffic combine?",
+      "a": "Use live speed when confidence/freshness is high, otherwise blend toward time-of-day historical baseline. Incidents and closures can impose hard constraints."
+    },
+    {
+      "q": "How do you keep market/map updates consistent for a long route?",
+      "a": "Pin the route computation to a versioned base graph and a traffic snapshot/epoch. Navigation may later reroute against a newer snapshot rather than mixing topology mid-computation."
+    }
+  ],
+  "mistakes": [
+    "Using plain global Dijkstra",
+    "Putting tile rendering on application servers rather than CDN",
+    "Treating raw GPS as exact road position",
+    "Recomputing routes on every tiny traffic fluctuation"
+  ],
+  "seniorSignal": "Decompose static topology from dynamic weights, and explain graph preprocessing, version consistency, traffic confidence, privacy, and graceful stale-data behavior.",
+  "implementation": [
+    "Versioned vector tiles in object storage/CDN",
+    "Graph preprocessing jobs and in-memory A*/contraction-hierarchy service",
+    "Kafka/Flink traffic aggregation with map matching",
+    "S2/geohash spatial indexes for geocoding and tile ownership"
+  ],
+  "related": [
+    13,
+    16,
+    17,
+    19,
+    20,
+    24
+  ],
+  "tags": [
+    "routing",
+    "A*",
+    "map tiles",
+    "traffic",
+    "geocoding",
+    "graph"
+  ],
+  "repoTitle": "Google Maps",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/18.%20Google%20Maps"
+}
