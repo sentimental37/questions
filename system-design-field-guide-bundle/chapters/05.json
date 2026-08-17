@@ -1,0 +1,150 @@
+{
+  "id": 5,
+  "title": "Consistent Hashing",
+  "category": "Foundations",
+  "kind": "Foundation",
+  "difficulty": "Core",
+  "time": 25,
+  "oneLine": "Map keys and virtual nodes onto a ring so membership changes move only a bounded portion of data instead of remapping everything.",
+  "opening": "Modulo hashing works while the server count is fixed, but adding or removing a server remaps most keys and can cause a cache miss or data migration storm. With consistent hashing, I hash both keys and virtual nodes into the same circular space and assign each key to the next node clockwise. Membership changes move only the keys in the affected interval. I would use many weighted virtual nodes per physical node to smooth distribution, reflect heterogeneous capacity, and make rebalancing gradual. I would still monitor skew because a ring does not eliminate hot keys, and I would separate placement metadata from application routing so membership updates are versioned and safe.",
+  "ask": [
+    "Are we placing cached objects, durable data replicas, partitions, or requests?",
+    "How frequently does membership change?",
+    "Are nodes equal capacity?",
+    "What replication and failure-domain rules must placement obey?"
+  ],
+  "requirements": {
+    "functional": [
+      "Locate owner for a key",
+      "Add/remove nodes with limited movement",
+      "Support replicas"
+    ],
+    "nonFunctional": [
+      "Even distribution",
+      "Fast lookup",
+      "Stable membership changes",
+      "Failure-domain awareness"
+    ]
+  },
+  "scale": [
+    "With N evenly distributed nodes, adding one node moves roughly 1/(N+1) of keys in the ideal case.",
+    "Use tens to hundreds of virtual nodes per physical node, then tune from observed variance and metadata cost.",
+    "Replica placement must skip the same host/AZ/rack; clockwise copies alone are not enough."
+  ],
+  "flows": [
+    {
+      "name": "Placement",
+      "nodes": [
+        "Hash key",
+        "Find first token clockwise",
+        "Apply rack/AZ rules",
+        "Return primary + replicas",
+        "Version routing decision"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Ring or rendezvous hashing",
+      "default": "Use a ring when range movement and ordered tokens are useful; consider rendezvous hashing for simpler top-K node selection.",
+      "why": "Both minimize remapping, but operational and lookup characteristics differ.",
+      "switch": "Use a directory/range map when you need precise manual splits, ordered scans, or shard-specific policy."
+    },
+    {
+      "topic": "Virtual nodes",
+      "default": "Use weighted virtual nodes and rebalance incrementally.",
+      "why": "They smooth random gaps and let a larger server own proportionally more ranges.",
+      "switch": "Use a bounded-load variant when strict maximum imbalance matters."
+    },
+    {
+      "topic": "Membership source",
+      "default": "Use a versioned, strongly consistent control-plane view.",
+      "why": "Two clients routing with incompatible rings can create split ownership and inconsistent writes.",
+      "switch": "Gossip can distribute health quickly, but ownership changes still need safe epochs/fencing."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Replication",
+      "points": [
+        "Walk clockwise to distinct failure domains, not merely distinct tokens.",
+        "Use preference lists and sloppy quorum/hinted handoff if availability is prioritized.",
+        "Record ownership epoch to reject writes from stale routers."
+      ]
+    },
+    {
+      "title": "Rebalancing",
+      "points": [
+        "Stream ranges in throttled chunks while serving reads.",
+        "Dual-read or forward requests during ownership transfer.",
+        "Verify checksums before switching authoritative ownership."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Uneven ring distribution",
+      "response": "More virtual nodes, weighted tokens, bounded-load placement, and continuous skew metrics."
+    },
+    {
+      "risk": "Hot key despite even key count",
+      "response": "Replicate/split the key, add request coalescing, or isolate a celebrity tenant; hashing balances keys, not workload."
+    },
+    {
+      "risk": "Stale ring view",
+      "response": "Epoch numbers, fencing tokens, retry with latest topology, and controlled membership transitions."
+    },
+    {
+      "risk": "Correlated replicas",
+      "response": "Topology-aware placement across host, rack/AZ, and region."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why not hash(key) % N?",
+      "a": "When N changes, most keys get a different remainder. Consistent hashing keeps unaffected intervals stable and moves only a fraction of keys."
+    },
+    {
+      "q": "What do virtual nodes solve?",
+      "a": "They reduce uneven gaps, make capacity weighting possible, and break a physical node’s ownership into small movable pieces."
+    },
+    {
+      "q": "Does consistent hashing guarantee perfect balance?",
+      "a": "No. It gives probabilistic balance and limited remapping. You still need enough tokens, workload metrics, and hot-key mitigation."
+    },
+    {
+      "q": "How do clients discover the ring?",
+      "a": "From a versioned control plane or routing service. Cache locally, refresh on topology errors, and include an epoch so stale routing is detectable."
+    }
+  ],
+  "mistakes": [
+    "Claiming only one key moves when a node joins",
+    "Ignoring virtual nodes and capacity weighting",
+    "Placing replicas without AZ/rack awareness",
+    "Assuming balanced key count means balanced CPU or traffic"
+  ],
+  "seniorSignal": "Distinguish data placement, request routing, and membership consensus. Explain epochs, transfer safety, replica topology, and hot-key behavior.",
+  "implementation": [
+    "Sorted map of 64-bit tokens for a ring",
+    "Weighted virtual nodes derived from node capacity",
+    "Topology metadata in etcd/Consul/ZooKeeper with epochs",
+    "Consistent-hash load balancing in Envoy or client SDK for request routing"
+  ],
+  "related": [
+    1,
+    6,
+    17,
+    19,
+    20,
+    24
+  ],
+  "tags": [
+    "hash ring",
+    "virtual nodes",
+    "partitioning",
+    "rebalance",
+    "replication"
+  ],
+  "repoTitle": "Consistent Hashing",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/05.%20Consistent%20Hashing"
+}
