@@ -1,0 +1,161 @@
+{
+  "id": 3,
+  "title": "System Design Interview Framework",
+  "category": "Foundations",
+  "kind": "Foundation",
+  "difficulty": "Core",
+  "time": 15,
+  "oneLine": "Control the interview: clarify scope, estimate scale, draw the main flow, then spend the remaining time on the riskiest decisions.",
+  "opening": "I use a four-step structure. First, I clarify users, core workflows, scale, consistency, latency, and failure expectations so we solve the intended problem. Second, I define APIs, the main data model, rough estimates, and a high-level architecture. Third, I select two or three deep dives based on the system’s real risks—such as ordering, partitioning, idempotency, hot keys, or reconciliation. Finally, I summarize trade-offs, bottlenecks, observability, security, and how the design evolves. I keep checking for interviewer buy-in instead of presenting a memorized architecture.",
+  "ask": [
+    "Which user journeys are in scope and explicitly out of scope?",
+    "What scale and latency target should drive the design?",
+    "Which data invariants require strong consistency?",
+    "Which two deep-dive areas would be most valuable to discuss?"
+  ],
+  "requirements": {
+    "functional": [
+      "Clarify use cases",
+      "Define APIs and data",
+      "Propose and defend architecture"
+    ],
+    "nonFunctional": [
+      "Time management",
+      "Interactive communication",
+      "Trade-off reasoning",
+      "Failure-aware design"
+    ]
+  },
+  "scale": [
+    "Typical 45-minute allocation: 5–8 min scope and estimates, 10–15 min high level, 15–20 min deep dives, 3–5 min wrap-up.",
+    "Aim for two or three deep dives, not shallow coverage of ten technologies.",
+    "Reserve time to revisit assumptions and identify the next bottleneck."
+  ],
+  "flows": [
+    {
+      "name": "Interview flow",
+      "nodes": [
+        "Clarify",
+        "Estimate",
+        "APIs + data",
+        "High-level diagram",
+        "Critical flows",
+        "Deep dives",
+        "Failures + trade-offs",
+        "Summary"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Breadth versus depth",
+      "default": "Get a coherent end-to-end design first, then go deep on the highest-risk components.",
+      "why": "A perfect cache discussion cannot rescue a missing write path or invariant.",
+      "switch": "Go deep earlier when the interviewer explicitly anchors on one subsystem."
+    },
+    {
+      "topic": "Technology names",
+      "default": "Describe required properties before naming a product.",
+      "why": "It demonstrates architectural reasoning and avoids technology-by-association.",
+      "switch": "Name concrete options to show implementation credibility after the property is clear."
+    },
+    {
+      "topic": "Assumptions",
+      "default": "State and record them visibly; revise when the interviewer changes scope.",
+      "why": "Most poor answers solve a different problem than the one asked.",
+      "switch": "Use a reasonable default when information is unavailable, but label it as an assumption."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "A strong diagram",
+      "points": [
+        "Separate synchronous critical path from asynchronous side effects.",
+        "Show ownership of state and where ordering/transactions occur.",
+        "Draw external dependencies and failure boundaries, not only boxes."
+      ]
+    },
+    {
+      "title": "Data first",
+      "points": [
+        "Name primary entities and access patterns before selecting storage.",
+        "Identify uniqueness, ordering, balance, inventory, or permission invariants.",
+        "State partition key and lifecycle/retention for large records."
+      ]
+    },
+    {
+      "title": "Finish like an architect",
+      "points": [
+        "Call out hotspots, consistency, security, observability, rollout, and cost.",
+        "State what you deliberately did not build yet.",
+        "Describe the first evolution step at 10× scale."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Running out of time",
+      "response": "Time-box clarification and estimates, get buy-in, and explicitly choose the top deep dives."
+    },
+    {
+      "risk": "Silent assumptions",
+      "response": "Keep a small assumptions panel and refer back to it when making trade-offs."
+    },
+    {
+      "risk": "Box-and-arrow narration",
+      "response": "Walk one read and one write end to end, including retries and source of truth."
+    },
+    {
+      "risk": "Overengineering",
+      "response": "Start with the smallest design that meets the stated scale; explain the trigger for the next mechanism."
+    }
+  ],
+  "questions": [
+    {
+      "q": "What should I do when the interviewer is silent?",
+      "a": "State the assumption you will use, explain why it is reasonable, and proceed. Periodically offer a choice of deep dives instead of asking open-ended permission at every step."
+    },
+    {
+      "q": "Should I mention CAP theorem?",
+      "a": "Only when a network partition or replicated write path makes the consistency/availability trade-off relevant. Name the concrete user-visible behavior rather than dropping the acronym."
+    },
+    {
+      "q": "How detailed should APIs be?",
+      "a": "Enough to expose idempotency, pagination/cursors, filtering, async status, and core resource boundaries. Do not spend the interview writing a full OpenAPI specification."
+    },
+    {
+      "q": "How do I sound senior rather than memorized?",
+      "a": "Tie choices to invariants, operational reality, migrations, and failure behavior. State alternatives and the condition under which you would choose them."
+    }
+  ],
+  "mistakes": [
+    "Beginning with Kafka, Redis, and Kubernetes before defining the problem",
+    "Ignoring write paths and only describing reads",
+    "Claiming exactly-once or zero downtime without a mechanism",
+    "Failing to summarize the design and unresolved risks"
+  ],
+  "seniorSignal": "Own the conversation. Convert ambiguity into assumptions, make decision criteria explicit, and spend time where correctness or scale is genuinely hard.",
+  "implementation": [
+    "Practice drawing the same visual grammar: edge, stateless compute, state, log/queue, workers, observability",
+    "Prepare concise examples from your capital-markets systems for latency, entitlement, failure isolation, and migration trade-offs",
+    "Use concrete implementation anchors only after explaining the architectural property"
+  ],
+  "related": [
+    1,
+    2,
+    4,
+    6,
+    19,
+    26,
+    28
+  ],
+  "tags": [
+    "interview",
+    "framework",
+    "requirements",
+    "trade-offs",
+    "communication"
+  ],
+  "repoTitle": "System Design Framework",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/03.%20System%20Design%20Framework"
+}
