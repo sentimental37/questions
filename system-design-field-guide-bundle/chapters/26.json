@@ -1,0 +1,194 @@
+{
+  "id": 26,
+  "title": "Payment System",
+  "category": "Transactional & Financial",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 65,
+  "oneLine": "Drive every payment through an idempotent state machine, record money in an append-only double-entry ledger, treat PSP responses as uncertain evidence, and reconcile settlement independently.",
+  "opening": "I would separate payment orchestration from accounting. The client creates a payment order with an idempotency key and amount represented as decimal/minor units, never floating point. A durable state machine validates the order, persists it, and calls the PSP with its own idempotency key. Timeouts do not mean failure; PSP webhooks and status polling are ingested idempotently and advance only legal state transitions. Monetary effects are posted to an append-only double-entry ledger where every transaction balances debits and credits; corrections are compensating entries, never edits. A transactional outbox publishes downstream events. Settlement files and bank/PSP reports feed a reconciliation system that compares internal orders, ledger, PSP events, and cash movement, then creates exceptions or adjustments. PCI scope is minimized through hosted payment pages/tokenization, and refunds/chargebacks are separate linked workflows.",
+  "ask": [
+    "Pay-in, payout, refund, chargeback, or which flows?",
+    "Card, bank transfer, wallet, and which PSPs/regions/currencies?",
+    "What does success mean: authorized, captured, settled, or available?",
+    "Availability, latency, consistency, and regulatory/audit requirements?"
+  ],
+  "requirements": {
+    "functional": [
+      "Create/authorize/capture payment",
+      "Refund/payout",
+      "Ledger",
+      "Webhooks/status",
+      "Settlement/reconciliation"
+    ],
+    "nonFunctional": [
+      "No lost/double money",
+      "Idempotency",
+      "Auditability",
+      "Security/PCI",
+      "High availability with honest states"
+    ]
+  },
+  "scale": [
+    "Payment TPS may be modest compared with feeds, but correctness and long-lived workflows dominate design.",
+    "Use integer minor units or fixed decimal with currency-specific scale; never binary floating point.",
+    "Retain immutable business, provider, ledger, and reconciliation evidence according to regulation."
+  ],
+  "flows": [
+    {
+      "name": "Pay-in",
+      "nodes": [
+        "Client / hosted page",
+        "Payment API",
+        "Idempotent order",
+        "Risk",
+        "PSP adapter",
+        "Auth/capture",
+        "Webhook inbox",
+        "State machine",
+        "Ledger + outbox"
+      ]
+    },
+    {
+      "name": "Settlement",
+      "nodes": [
+        "PSP/bank report",
+        "Import/normalize",
+        "Match order/provider/ledger",
+        "Exceptions",
+        "Adjustment/ops",
+        "Financial close"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Source of truth",
+      "default": "Payment order state for workflow; double-entry ledger for money/accounting.",
+      "why": "Operational status and financial truth are related but not identical.",
+      "switch": "Never derive balances solely from PSP callbacks or a mutable status column."
+    },
+    {
+      "topic": "External call semantics",
+      "default": "Idempotent PSP request plus webhook inbox and reconciliation.",
+      "why": "Network timeout leaves outcome unknown and retries are unavoidable.",
+      "switch": "Provider-specific query/status API resolves ambiguous cases; do not guess."
+    },
+    {
+      "topic": "Workflow coordination",
+      "default": "Explicit durable state machine/orchestrated saga.",
+      "why": "It makes retries, timeouts, compensation, and operator recovery visible.",
+      "switch": "A workflow engine can implement it, but the business states/invariants remain yours."
+    },
+    {
+      "topic": "Ledger mutation",
+      "default": "Append-only balanced postings and compensating entries.",
+      "why": "Audit trails and historical balances must remain reproducible.",
+      "switch": "Materialized balances are caches/views validated against postings."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Double-entry ledger",
+      "points": [
+        "Each ledger transaction contains at least two postings whose signed amounts balance per currency.",
+        "Use immutable transaction ID, account, amount, currency, effective/booked time, and reference lineage.",
+        "Postings and materialized balance update occur atomically; periodically recompute/check balances."
+      ]
+    },
+    {
+      "title": "Idempotency",
+      "points": [
+        "Scope key to merchant/customer operation and persist request fingerprint plus final/in-progress response.",
+        "Reject same key with different payload.",
+        "Use inbox for webhooks and outbox for emitted events so retries are harmless."
+      ]
+    },
+    {
+      "title": "Reconciliation",
+      "points": [
+        "Match internal order, PSP transaction, settlement batch, fees, refunds, and bank cash.",
+        "Classify timing differences versus real discrepancies.",
+        "Exceptions are durable cases with owner, evidence, resolution, and append-only adjustment."
+      ]
+    },
+    {
+      "title": "Security",
+      "points": [
+        "Tokenize card data and use hosted fields/pages to reduce PCI scope.",
+        "Encrypt secrets, rotate keys, sign/verify webhooks, enforce least privilege and dual control.",
+        "Separate fraud/risk decision evidence from payment state."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "PSP call times out after charge succeeded",
+      "response": "Keep UNKNOWN/PENDING, retry with same provider idempotency key, ingest webhook/status, and reconcile—never charge with a new key."
+    },
+    {
+      "risk": "Webhook duplicated or out of order",
+      "response": "Unique provider event inbox and legal monotonic state transitions; store all evidence."
+    },
+    {
+      "risk": "Ledger posting succeeds but event publish fails",
+      "response": "Transactional outbox in the same DB commit; publisher retries until acknowledged."
+    },
+    {
+      "risk": "Settlement total differs",
+      "response": "Reconciliation opens an exception, blocks premature finality where necessary, and posts explicit adjustment after investigation."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why do we need a ledger if the PSP has records?",
+      "a": "The PSP is an external operational counterparty, not your complete accounting source. You need internal fees, liabilities, refunds, merchant balances, timing, and an auditable view independent of provider availability."
+    },
+    {
+      "q": "Can a payment API return success immediately?",
+      "a": "Only if the defined state is reached. ‘Authorized’ is not ‘captured’ or ‘settled.’ Return a payment resource/status and support asynchronous completion for uncertain or slow rails."
+    },
+    {
+      "q": "How do you ensure exactly-once payment?",
+      "a": "There is no magic distributed exactly once. Use idempotency at client, orchestration, provider, webhook, ledger, and event boundaries, then reconciliation to detect residual uncertainty."
+    },
+    {
+      "q": "What happens on refund?",
+      "a": "Create a linked idempotent refund workflow, call the rail/provider, ingest evidence, and append reversing/appropriate ledger postings. Do not mutate the original payment."
+    }
+  ],
+  "mistakes": [
+    "Using double for money",
+    "Treating timeout as failure",
+    "Mutable ledger rows",
+    "Saying Kafka gives exactly-once money movement",
+    "No settlement reconciliation"
+  ],
+  "seniorSignal": "Be exact about state meanings and uncertainty. Anchor the answer on invariants, double-entry accounting, idempotency at every boundary, append-only evidence, and operational reconciliation.",
+  "implementation": [
+    "Spring Boot payment state machine with PostgreSQL transactions",
+    "Append-only ledger tables plus balanced constraint/materialized balances",
+    "PSP adapters with idempotency, signed webhook inbox, and status polling",
+    "Transactional outbox/Kafka and a separate reconciliation/exception service"
+  ],
+  "related": [
+    6,
+    7,
+    19,
+    20,
+    21,
+    22,
+    27,
+    28
+  ],
+  "tags": [
+    "payment",
+    "ledger",
+    "idempotency",
+    "PSP",
+    "reconciliation",
+    "double entry"
+  ],
+  "repoTitle": "Payment System",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/26.%20Payment%20System"
+}
