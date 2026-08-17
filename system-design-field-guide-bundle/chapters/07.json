@@ -1,0 +1,152 @@
+{
+  "id": 7,
+  "title": "Distributed Unique ID Generator",
+  "category": "Storage & Messaging",
+  "kind": "Design Case",
+  "difficulty": "Core",
+  "time": 30,
+  "oneLine": "Generate sortable 64-bit IDs locally by packing timestamp, location, worker, and per-millisecond sequence bits—with explicit clock-drift handling.",
+  "opening": "My default is a Snowflake-style 64-bit identifier because it avoids a central database call while remaining roughly time ordered and index friendly. I allocate bits to a custom epoch timestamp, datacenter, worker, and sequence counter. Each worker generates IDs locally and can issue several thousand IDs per millisecond. Worker IDs come from a leased, fenced registry so two live workers never share an identity. The main operational risk is clock rollback: the generator should use a monotonic clock where possible, wait for small rollback, switch to a reserved clock/epoch bit or stop for unsafe rollback, and alert. I would make the bit layout configurable only through a controlled compatibility plan because it determines lifetime and capacity.",
+  "ask": [
+    "Must IDs be numeric, URL-safe, opaque, sortable, or globally unique?",
+    "What generation rate and lifetime are required?",
+    "Can clients infer creation time or business volume?",
+    "Are IDs generated in multiple regions while disconnected?"
+  ],
+  "requirements": {
+    "functional": [
+      "Generate unique IDs",
+      "Work across nodes/regions",
+      "Optionally preserve time order"
+    ],
+    "nonFunctional": [
+      "No central hot path",
+      "Low latency",
+      "Long lifetime",
+      "Operational safety under clock or worker failure"
+    ]
+  },
+  "scale": [
+    "A 12-bit sequence supports 4,096 IDs per worker per millisecond.",
+    "10 worker bits allow 1,024 worker identities; split between region/datacenter and machine as needed.",
+    "41 timestamp bits at millisecond precision last about 69 years from the custom epoch."
+  ],
+  "flows": [
+    {
+      "name": "Generation",
+      "nodes": [
+        "Worker lease",
+        "Read monotonic time",
+        "Check rollback",
+        "Increment sequence",
+        "Pack bits",
+        "Return 64-bit ID"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "UUID or Snowflake",
+      "default": "Snowflake for database/index locality and compact numeric IDs; UUIDv7 when standards/interoperability and decentralized generation matter.",
+      "why": "Random UUIDs fragment ordered indexes; time-ordered UUIDs reduce that cost.",
+      "switch": "Use random/opaque IDs when timestamp leakage or enumeration is a security concern."
+    },
+    {
+      "topic": "Central ticket server",
+      "default": "Avoid it on the critical path unless strict monotonic sequence is required.",
+      "why": "It is simple but becomes a coordination and availability bottleneck.",
+      "switch": "Allocate ID ranges in batches from a central service to combine monotonic blocks with local generation."
+    },
+    {
+      "topic": "Clock rollback",
+      "default": "Fence worker IDs, detect rollback, wait for small skew, and halt or use a logical epoch for large skew.",
+      "why": "Continuing blindly can create duplicates.",
+      "switch": "Use consensus-backed sequence ranges when physical time cannot be trusted."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Bit allocation",
+      "points": [
+        "Start from required lifetime, nodes, and per-node burst—not a memorized layout.",
+        "Reserve room for future region growth or use a namespace/version bit.",
+        "Document signed/unsigned behavior across Java, JavaScript, and databases."
+      ]
+    },
+    {
+      "title": "Worker identity",
+      "points": [
+        "Lease IDs from etcd/ZooKeeper with session expiry.",
+        "Use fencing tokens so an old process cannot resume after its lease was reassigned.",
+        "Persist last timestamp across restart when needed."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Two workers share an ID",
+      "response": "Leased worker registry, fencing token, and startup refusal on duplicate ownership."
+    },
+    {
+      "risk": "Clock moves backward",
+      "response": "Detect against last timestamp, wait/quarantine, use logical offset, and alert; never silently reset sequence."
+    },
+    {
+      "risk": "Sequence overflows within a millisecond",
+      "response": "Wait for next tick, increase sequence bits, or distribute load across more workers."
+    },
+    {
+      "risk": "IDs leak business volume/time",
+      "response": "Encode/obfuscate externally, use UUIDv7/random public IDs, or separate internal and public identifiers."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Are Snowflake IDs strictly ordered globally?",
+      "a": "They are roughly time ordered, not a single global sequence. Clock differences and concurrent workers mean two IDs can be generated in a different order than their numeric value."
+    },
+    {
+      "q": "Why not database auto-increment?",
+      "a": "It is simple for one database, but multi-primary allocation, failover, and a central write hotspot complicate global scale. It is still the right answer for many modest systems."
+    },
+    {
+      "q": "What happens after the timestamp field expires?",
+      "a": "The bit layout needs a migration/version plan long before expiry—new namespace, wider ID, or a new epoch distinguished by version. This is a compatibility concern across every consumer."
+    },
+    {
+      "q": "How do you expose IDs to JavaScript?",
+      "a": "A 64-bit integer exceeds JavaScript’s safe Number range. Return it as a string or BigInt-compatible representation and keep schemas consistent."
+    }
+  ],
+  "mistakes": [
+    "Claiming global strict ordering",
+    "Ignoring NTP rollback and VM clock behavior",
+    "Using JavaScript Number for 64-bit IDs",
+    "Memorizing a bit layout without deriving capacity"
+  ],
+  "seniorSignal": "Derive the layout from lifetime and throughput, then spend most of the discussion on identity leases, fencing, clock failure, public-information leakage, and migration.",
+  "implementation": [
+    "Java long with bit shifts; return as a string over JSON",
+    "Worker leases and fencing in etcd/ZooKeeper",
+    "Micrometer metrics for rollback, sequence wait, lease renewal, and generation rate",
+    "Consider UUIDv7 for interoperable time-ordered public IDs"
+  ],
+  "related": [
+    2,
+    5,
+    6,
+    8,
+    12,
+    19,
+    28
+  ],
+  "tags": [
+    "Snowflake",
+    "UUID",
+    "clock drift",
+    "worker ID",
+    "bit allocation"
+  ],
+  "repoTitle": "Unique-Id Generator",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/07.%20Unique-Id%20Generator"
+}
