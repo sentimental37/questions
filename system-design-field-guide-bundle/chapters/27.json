@@ -1,0 +1,192 @@
+{
+  "id": 27,
+  "title": "Digital Wallet",
+  "category": "Transactional & Financial",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 65,
+  "oneLine": "Process wallet commands through deterministic partitioned state machines, replicate immutable events with consensus, expose CQRS read models, and coordinate cross-shard transfers with a recoverable saga or TCC.",
+  "opening": "A wallet transfer has two legs and must preserve conservation of value: debit and credit cannot be lost or duplicated. I would expose an idempotent transfer command and route each account to a partition whose leader runs a deterministic state machine. The leader validates balance and emits immutable debit/credit ledger events, replicated through Raft before acknowledgment. CQRS read models materialize balances and history from the event log; snapshots speed recovery but the events remain authoritative. When both accounts share a partition, one local transaction applies both legs. Cross-partition transfers use a durable orchestrator with TCC or saga semantics: reserve/debit first so intermediate state cannot be spent, then credit, and compensate/recover from every phase. Phase state, fencing, retries, and out-of-order messages are explicit. Reconciliation and replay continuously prove balances and event history agree.",
+  "ask": [
+    "Wallet-to-wallet transfer only, or deposit/withdrawal/FX too?",
+    "Scale, currencies, overdraft/negative balance rules?",
+    "Is synchronous finality required or can transfer be pending?",
+    "What audit, replay, and availability guarantees?"
+  ],
+  "requirements": {
+    "functional": [
+      "Transfer balance",
+      "Balance/history",
+      "Idempotency",
+      "Replay/reconciliation"
+    ],
+    "nonFunctional": [
+      "Conservation of value",
+      "No double spend",
+      "Very high throughput",
+      "99.99% availability",
+      "Deterministic audit"
+    ]
+  },
+  "scale": [
+    "Each transfer produces at least two account postings; 1M transfers/s implies 2M+ ledger events/s before replication.",
+    "Partition by account ID, but colocate related accounts only if a stable business grouping reduces cross-shard transfers.",
+    "Single partition throughput is bounded by sequential consensus/state-machine work; scale through many independent Raft groups."
+  ],
+  "flows": [
+    {
+      "name": "Same-partition",
+      "nodes": [
+        "Transfer command",
+        "Idempotency",
+        "Partition leader",
+        "Validate",
+        "Replicate event batch",
+        "Apply debit+credit",
+        "Read model",
+        "Receipt"
+      ]
+    },
+    {
+      "name": "Cross-partition",
+      "nodes": [
+        "Saga/TCC coordinator",
+        "Persist phase",
+        "Debit/reserve shard A",
+        "Evidence/ACK",
+        "Credit shard B",
+        "Finalize",
+        "Notify / reconcile"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "State model",
+      "default": "Immutable double-entry events/ledger plus materialized balance read model.",
+      "why": "Replay, audit, and historical proof are first-class wallet requirements.",
+      "switch": "A transactional relational ledger may be simpler at moderate scale; event sourcing should not be adopted without deterministic tooling."
+    },
+    {
+      "topic": "Replication",
+      "default": "Per-partition consensus/Raft for ordered durable events.",
+      "why": "A wallet cannot accept ambiguous divergent balances from AP replication.",
+      "switch": "Asynchronous replicas can serve stale history, but authoritative writes go through the leader/quorum."
+    },
+    {
+      "topic": "Cross-shard transfer",
+      "default": "Orchestrated saga/TCC with debit/reserve before credit and durable phase table.",
+      "why": "It avoids global 2PC locks while ensuring intermediate funds cannot be spent twice.",
+      "switch": "Use 2PC only in a tightly controlled database system where latency/availability trade-offs are accepted."
+    },
+    {
+      "topic": "Command/event separation",
+      "default": "Commands may fail; accepted events are deterministic facts and never call external I/O during replay.",
+      "why": "Reproducibility requires the same event sequence to produce the same state.",
+      "switch": "External decisions must be captured as explicit input events with their evidence/version."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "TCC/saga safety",
+      "points": [
+        "Persist coordinator phase before sending operations and use idempotent operation IDs.",
+        "Debit/reserve first; crediting first creates spendable money during partial completion.",
+        "Handle cancel-before-try and duplicate/out-of-order commands with phase/version checks."
+      ]
+    },
+    {
+      "title": "High-performance event sourcing",
+      "points": [
+        "Append sequentially to a local WAL/event store, keep hot state in memory/RocksDB, and snapshot periodically.",
+        "Replicate the event log—not merely the cache—through consensus.",
+        "Use single-writer event loops and batching, but preserve durability and observability."
+      ]
+    },
+    {
+      "title": "CQRS and client receipt",
+      "points": [
+        "Write acceptance and read-model visibility are different milestones.",
+        "Return transfer ID/status; reverse proxy/gateway can wait or push completion without polling every partition.",
+        "Balance response includes version/sequence so clients know freshness."
+      ]
+    },
+    {
+      "title": "Proof and reconciliation",
+      "points": [
+        "Sum postings per currency must be zero across system accounts.",
+        "Replay event log into a shadow state machine and compare balances/snapshots.",
+        "Code upgrades run against historical events to detect semantic drift before rollout."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Coordinator crashes after debit before credit",
+      "response": "Recover durable phase, query idempotent operation status, continue credit or compensate according to state machine; funds remain reserved/unspendable."
+    },
+    {
+      "risk": "Leader fails after replication/response uncertainty",
+      "response": "New Raft leader has committed log; client retries same transfer ID and receives existing state."
+    },
+    {
+      "risk": "Read model lags",
+      "response": "Expose status/version, allow leader/consistent read for critical confirmation, and monitor projection lag."
+    },
+    {
+      "risk": "Bug in event handler",
+      "response": "Stop affected partition, replay in shadow with fixed deterministic code, compare, then rebuild projection or append correction events—never edit history silently."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Saga versus TCC?",
+      "a": "Both use local transactions and compensation. TCC explicitly reserves in a try phase and can execute branches in parallel; saga is an ordered sequence with rollback. Choose from latency, resource reservation, and domain complexity—not fashion."
+    },
+    {
+      "q": "Why not Redis balances for 1M TPS?",
+      "a": "Redis can deliver throughput, but simple sharded counters do not provide cross-shard atomicity, durable audit, deterministic replay, or financial reconciliation. It can serve read models/caches, not be the entire correctness story."
+    },
+    {
+      "q": "What is the wallet invariant?",
+      "a": "No account spends more available funds than allowed, every transfer has balanced debit/credit postings in one currency, and each business command affects the ledger at most once."
+    },
+    {
+      "q": "How do you scale a hot account?",
+      "a": "One account’s authoritative ordered writes are inherently serial. Use batching/netting, product limits, subaccounts with controlled aggregation, or dedicated partition capacity; do not pretend hashing removes the ordering constraint."
+    }
+  ],
+  "mistakes": [
+    "Crediting before reserving/debiting",
+    "Calling event sourcing a replacement for accounting invariants",
+    "Ignoring out-of-order compensation",
+    "Using eventual consistency for spendable authoritative balance",
+    "No replay/version migration plan"
+  ],
+  "seniorSignal": "State conservation-of-value and no-double-spend invariants first. Then explain deterministic state machines, consensus boundaries, cross-shard phase recovery, read-model lag, and proof by replay/reconciliation.",
+  "implementation": [
+    "Partitioned Java event-loop services with Raft-backed append logs",
+    "RocksDB/in-memory state and snapshot artifacts",
+    "Saga/TCC coordinator with durable phase table, idempotent operation IDs, and fencing",
+    "CQRS balance/history projections, reconciliation, and shadow replay tooling"
+  ],
+  "related": [
+    6,
+    7,
+    19,
+    20,
+    21,
+    26,
+    28
+  ],
+  "tags": [
+    "wallet",
+    "event sourcing",
+    "CQRS",
+    "Raft",
+    "TCC",
+    "saga"
+  ],
+  "repoTitle": "Digital Wallet",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/27.%20%20Digital%20Wallet"
+}
