@@ -1,0 +1,225 @@
+{
+  "id": 28,
+  "title": "Stock Exchange",
+  "category": "Transactional & Financial",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 70,
+  "oneLine": "Keep the trading critical path deterministic and single-writer per symbol partition: gateway, pre-trade risk, sequencer, in-memory matching engine, ordered fills, then asynchronous market data and reporting.",
+  "opening": "I would divide the exchange into a latency-critical trading path and asynchronous market-data/reporting paths. Brokers connect through lightweight gateways—FIX or a proprietary low-latency protocol. The order manager authenticates, applies pre-trade risk and funds reservation, then sends a minimal command to a sequencer. Each symbol belongs to one matching-engine partition with a single ordered input stream, producing deterministic fills using price-time priority. The order book is in memory: ordered price levels, FIFO linked lists at each level, and an order-ID map for O(1) cancellation. Accepted commands and fills are written to a replicated event log so a hot standby can replay exactly. Market-data publishers rebuild books/candles from fills and distribute fairly, while reporting, surveillance, settlement, and analytics stay off the critical path. For microsecond-class latency, use pinned event loops, preallocated ring buffers, no blocking I/O/GC on the core, and colocated warm replicas with tested failover.",
+  "ask": [
+    "Which instruments and order types—limit, market, cancel, replace?",
+    "Symbols, orders/day, peak at open, and latency percentile target?",
+    "What pre-trade risk, balance/position reservation, and regulatory checks?",
+    "Market-data depth, fairness, persistence, and recovery requirements?"
+  ],
+  "requirements": {
+    "functional": [
+      "Place/cancel orders",
+      "Match price-time priority",
+      "Emit fills",
+      "L1/L2 market data",
+      "Risk/funds checks",
+      "Reporting"
+    ],
+    "nonFunctional": [
+      "Determinism/fairness",
+      "Micro/millisecond tail latency",
+      "No lost/duplicate fills",
+      "Fast recovery",
+      "Security/compliance"
+    ]
+  },
+  "scale": [
+    "1B orders over 6.5 trading hours is about 43K/s average and roughly 200K+/s at a 5× open peak.",
+    "Ordering is per symbol/partition, so scale by assigning symbols to matching cores while isolating exceptionally hot symbols.",
+    "Tail latency and jitter matter more than average; measure p99.9/p99.99 and pause sources such as GC, page faults, and network queues."
+  ],
+  "flows": [
+    {
+      "name": "Trading critical path",
+      "nodes": [
+        "Broker/FIX",
+        "Client gateway",
+        "Order manager",
+        "Risk + funds reserve",
+        "Inbound sequencer",
+        "Matching core/order book",
+        "Outbound sequencer",
+        "Fill ACK"
+      ]
+    },
+    {
+      "name": "Derived paths",
+      "nodes": [
+        "Ordered fills/events",
+        "Market-data publisher",
+        "L1/L2/candles/multicast",
+        "Reporter/surveillance",
+        "History/settlement/analytics"
+      ]
+    },
+    {
+      "name": "Recovery",
+      "nodes": [
+        "Replicated event log",
+        "Warm standby replay",
+        "State checksum",
+        "Leader fencing",
+        "Gateway reroute"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Concurrency model",
+      "default": "Single writer/event loop per symbol partition.",
+      "why": "It eliminates locks and makes matching deterministic; parallelism comes from independent partitions.",
+      "switch": "Do not parallelize one order book unless you can prove identical price-time outcomes."
+    },
+    {
+      "topic": "Sequencing",
+      "default": "Assign monotonic sequence to every accepted command and fill before state transition/publication.",
+      "why": "It gives fairness, gap detection, replay, dedupe, and deterministic standby state.",
+      "switch": "General Kafka may be acceptable for millisecond systems; specialized in-memory/WAL sequencing for microseconds."
+    },
+    {
+      "topic": "Durability versus latency",
+      "default": "Replicate ordered events to warm standby with a defined ACK point and zero-loss target.",
+      "why": "A fill cannot disappear, but synchronous remote-region consensus may violate latency.",
+      "switch": "Local synchronous replica plus asynchronous disaster-recovery region, with clear RPO/market halt policy."
+    },
+    {
+      "topic": "Risk placement",
+      "default": "Pre-trade hard limits and funds/position reservation before matching; complex surveillance after trade.",
+      "why": "Only checks required to prevent invalid execution belong on the critical path.",
+      "switch": "Cache/precompute risk state and make updates sequenced so the check remains deterministic."
+    },
+    {
+      "topic": "Market data",
+      "default": "Derive from the same ordered event stream and distribute via fair multicast/retransmission channels.",
+      "why": "Subscribers should see a consistent book and no participant should gain accidental timing advantage.",
+      "switch": "Internet clients consume normalized WebSocket/REST through a separate distribution tier."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Order book",
+      "points": [
+        "Buy side ordered highest price first; sell side lowest first.",
+        "Each price level holds FIFO orders for price-time priority; order-ID map points directly to linked-list node for O(1) cancel.",
+        "Partial fills update remaining quantity and may emit multiple executions."
+      ]
+    },
+    {
+      "title": "Low-latency mechanics",
+      "points": [
+        "Pin event loop to CPU, preallocate objects/ring buffers, avoid locks, blocking calls, allocation, and synchronous logging.",
+        "Use memory-mapped/shared-memory queues within a host and carefully designed kernel-bypass/UDP where warranted.",
+        "Keep the core small; move enrichment, persistence views, and reporting off-path."
+      ]
+    },
+    {
+      "title": "Deterministic recovery",
+      "points": [
+        "Standby consumes identical sequenced commands but is fenced from publishing.",
+        "Snapshots accelerate replay; event log remains authoritative for the gap.",
+        "Compare sequence/checksum before promotion and prevent split brain through lease/fencing/market-halt rules."
+      ]
+    },
+    {
+      "title": "Fair market data",
+      "points": [
+        "Publish one canonical ordered feed; sequence packets and support gap requests/retransmission.",
+        "Multicast reduces distribution skew inside controlled networks but UDP loss must be repaired.",
+        "Colocation rules, timestamping, and capacity allocation require governance, not only technology."
+      ]
+    },
+    {
+      "title": "Capital-markets connection",
+      "points": [
+        "Relate gateway/entitlement/risk boundaries to trader-facing APIs and OpenFin workflows.",
+        "Separate authoritative order/fill state from UI blotters and derived market data.",
+        "Discuss idempotent order commands, sequence gaps, partial fills, cancels, and stale-position risk using concrete desk experience."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Matching core crashes",
+      "response": "Fence old leader, promote validated warm standby at known sequence, replay gap, and halt/reject if determinism cannot be proven."
+    },
+    {
+      "risk": "Duplicate/new order retry",
+      "response": "Client order ID/idempotency plus session/sequence; return existing state rather than enqueueing twice."
+    },
+    {
+      "risk": "Gap in inbound or market-data sequence",
+      "response": "Stop processing beyond the gap, request replay/retransmission, and never silently reorder."
+    },
+    {
+      "risk": "Risk/wallet state is stale",
+      "response": "Sequence reservations/updates with orders, conservative reject on uncertain hard limits, and reconcile positions/funds after fills."
+    },
+    {
+      "risk": "Hot symbol saturates one core",
+      "response": "Dedicated core/hardware, optimize/batch surrounding work, product throttles; one book’s strict order remains serial."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why not make the matching engine a set of microservices?",
+      "a": "The core needs deterministic sequential state transitions and ultra-low jitter. Networked services and distributed locks add latency and nondeterminism. Keep the core cohesive; scale by symbol partitions and isolate noncritical functions."
+    },
+    {
+      "q": "How is price-time priority implemented?",
+      "a": "Choose the best opposing price, then consume orders FIFO within that price level. A tree/map locates best levels; linked lists preserve arrival order; an ID map enables cancellation."
+    },
+    {
+      "q": "How do you achieve exactly-once fills?",
+      "a": "Sequence commands, make matching deterministic, persist/replicate the event log, identify every fill, and make downstream consumers idempotent. On retry/replay, the same sequence produces the same fill IDs/state."
+    },
+    {
+      "q": "How do you fail over without split brain?",
+      "a": "Fencing token/leadership lease, known committed sequence, standby checksum/replay, gateway reroute, and a market-halt safety state when ownership is ambiguous. Availability never overrides market integrity."
+    },
+    {
+      "q": "How would you explain this from your experience?",
+      "a": "Anchor on order lifecycle and trader UI: entitlements and validation at entry, idempotent command IDs, authoritative ordered state, partial-fill/cancel events, position/risk updates, and blotters as projections. Then distinguish your UI/API experience from the matching core while showing you understand both."
+    }
+  ],
+  "mistakes": [
+    "Putting logging/database calls on the matching critical path",
+    "Claiming global horizontal scale for one order book",
+    "Ignoring partial fills and cancel races",
+    "Using wall-clock timestamps as the only ordering mechanism",
+    "Failing over without fencing and sequence proof"
+  ],
+  "seniorSignal": "This is an excellent case for you: emphasize deterministic ordered state, projection-based trader UIs, entitlement/risk boundaries, partial failure, and p99.99 latency. Integrity and fairness beat generic cloud patterns.",
+  "implementation": [
+    "FIX/client gateways and a minimal binary internal protocol",
+    "Single-threaded Java/C++ matching core with preallocated price-level/order structures",
+    "Chronicle Queue/Aeron-style sequenced event transport or specialized replicated WAL",
+    "Warm standby, snapshots/replay, KDB+/columnar market-data analytics, and async reporter/surveillance"
+  ],
+  "related": [
+    4,
+    7,
+    12,
+    19,
+    20,
+    21,
+    26,
+    27
+  ],
+  "tags": [
+    "matching engine",
+    "order book",
+    "FIX",
+    "sequencer",
+    "low latency",
+    "market data"
+  ],
+  "repoTitle": "Stock Exchange",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/28.%20Stock%20Exchange"
+}
