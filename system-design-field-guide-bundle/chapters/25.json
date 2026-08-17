@@ -1,0 +1,179 @@
+{
+  "id": 25,
+  "title": "Real-time Gaming Leaderboard",
+  "category": "Transactional & Financial",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 45,
+  "oneLine": "Validate score events, update an in-memory ordered index for real-time rank, persist the event/history separately, and partition around competition boundaries and hot top-K reads.",
+  "opening": "I would never let clients write a final score directly. The game service validates a signed result and emits an idempotent score event. A leaderboard service applies the scoring rule and updates a Redis sorted set or equivalent ordered index for the competition, giving O(log N) updates and efficient top-K, user rank, and around-user queries. The immutable event/history is persisted in a durable database or log so Redis can be rebuilt and disputes audited. Competitions and seasons are natural partition boundaries; very large boards can be sharded by score range or user hash with a merge layer, while top-K is replicated/cached. Tie rules use a stable secondary key such as achievement time. Anti-cheat, late-event policy, season close/finalization, and replay are part of correctness.",
+  "ask": [
+    "Highest score, cumulative score, fastest time, or another ranking rule?",
+    "Global, regional, friends, and seasonal boards?",
+    "Top K, exact user rank, around-user, and pagination?",
+    "How are scores trusted, corrected, and finalized?"
+  ],
+  "requirements": {
+    "functional": [
+      "Submit validated score",
+      "Top K",
+      "User rank/nearby ranks",
+      "Season reset/history"
+    ],
+    "nonFunctional": [
+      "Realtime reads",
+      "High write throughput",
+      "Deterministic ties",
+      "Anti-cheat",
+      "Recoverability"
+    ]
+  },
+  "scale": [
+    "Sorted-set memory is roughly users × member/score/structure overhead; measure, do not assume only 16 bytes per user.",
+    "Top-K reads are extremely cacheable; exact arbitrary rank is harder when sharded.",
+    "Partition by contest/season first because lifecycle and queries naturally align."
+  ],
+  "flows": [
+    {
+      "name": "Score update",
+      "nodes": [
+        "Game server",
+        "Signed result validation",
+        "Idempotency",
+        "Score event log/history",
+        "Leaderboard updater",
+        "Sorted index",
+        "Rank-change event"
+      ]
+    },
+    {
+      "name": "Query",
+      "nodes": [
+        "Client",
+        "Leaderboard API",
+        "Top-K cache / sorted set",
+        "Friend filter or shard merge",
+        "Rank response"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Ranking store",
+      "default": "Redis sorted set for real-time serving plus durable event/history store.",
+      "why": "It provides fast rank operations but should not be the sole audit/recovery record.",
+      "switch": "Custom skip-list/order-statistics service for massive scale or specialized tie/multi-score semantics."
+    },
+    {
+      "topic": "Score update rule",
+      "default": "Server-side atomic max/increment with event ID and scoring version.",
+      "why": "Retries and concurrent game results must not double count or reduce a best score accidentally.",
+      "switch": "Corrections use explicit adjustment events, not silent overwrite."
+    },
+    {
+      "topic": "Sharding",
+      "default": "Competition/season shard; keep a board together as long as it fits.",
+      "why": "Exact ranks are simple and fast on one ordered index.",
+      "switch": "Score-range shards make top/range queries efficient but moves users; hash shards simplify writes but require scatter/merge for rank."
+    },
+    {
+      "topic": "Season close",
+      "default": "Freeze an epoch, drain accepted events, persist final snapshot, then open a new board.",
+      "why": "A reset command racing with late scores creates unfair results.",
+      "switch": "Late events follow an explicit correction/appeal window."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Tie handling",
+      "points": [
+        "Define business order: score descending then achievement time ascending, then stable user ID.",
+        "Encode composite ordering or maintain secondary metadata.",
+        "Expose equal displayed rank versus deterministic internal order intentionally."
+      ]
+    },
+    {
+      "title": "Friends leaderboard",
+      "points": [
+        "Fetch friend IDs from graph cache, batch scores/ranks, then sort the bounded set.",
+        "Do not materialize a full leaderboard per user.",
+        "Cache active social subsets carefully with privacy changes."
+      ]
+    },
+    {
+      "title": "Anti-cheat",
+      "points": [
+        "Only trusted game servers sign results; validate impossible jumps and device/session evidence.",
+        "Keep raw game/result lineage and scoring-rule version.",
+        "Quarantine suspicious scores instead of immediately publishing them."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Duplicate result increments twice",
+      "response": "Unique event ID/inbox, atomic score update, and durable processed marker."
+    },
+    {
+      "risk": "Redis data loss",
+      "response": "Replica/persistence plus deterministic rebuild from score events/history and snapshots."
+    },
+    {
+      "risk": "Hot global top-K",
+      "response": "Replicated read cache and push invalidation; the write owner remains authoritative."
+    },
+    {
+      "risk": "Late event after season close",
+      "response": "Epoch/version validation and explicit correction window; never insert silently into the wrong season."
+    }
+  ],
+  "questions": [
+    {
+      "q": "How does Redis find rank?",
+      "a": "A sorted set is commonly implemented with a hash plus skip list, allowing score updates and rank/range queries in logarithmic time."
+    },
+    {
+      "q": "How do you get exact global rank from hash-sharded boards?",
+      "a": "You need per-shard counts above the user’s score plus tie handling, often using score histograms/range indexes. It is expensive; choose sharding to match exact-rank requirements."
+    },
+    {
+      "q": "How do you rebuild quickly?",
+      "a": "Load a recent snapshot for each competition, replay ordered score events after the snapshot, verify counts/checksums, then switch the serving pointer."
+    },
+    {
+      "q": "How do you prevent a client forging scores?",
+      "a": "Accept authoritative results only from trusted game servers with signed session/result IDs; perform anomaly checks and retain evidence for adjudication."
+    }
+  ],
+  "mistakes": [
+    "Trusting client-submitted score",
+    "Using Redis as the only durable record",
+    "Ignoring stable tie rules",
+    "Sharding by hash then hand-waving exact rank"
+  ],
+  "seniorSignal": "Connect data structure choice to exact query semantics, event idempotency, competition lifecycle, anti-cheat evidence, and deterministic rebuild.",
+  "implementation": [
+    "Redis ZSET for active board, with Lua for atomic rule/idempotency where appropriate",
+    "Kafka score events and PostgreSQL/Cassandra history",
+    "Snapshot/replay service and top-K cache",
+    "Signed game-result envelope and anomaly pipeline"
+  ],
+  "related": [
+    7,
+    13,
+    19,
+    20,
+    21,
+    28
+  ],
+  "tags": [
+    "leaderboard",
+    "Redis sorted set",
+    "rank",
+    "anti-cheat",
+    "season",
+    "top K"
+  ],
+  "repoTitle": "Real-time Gaming Leaderboard",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/25.%20Real-time%20Gaming%20Leaderboard"
+}
