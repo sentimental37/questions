@@ -1,0 +1,178 @@
+{
+  "id": 13,
+  "title": "Search Autocomplete",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Core",
+  "time": 40,
+  "oneLine": "Serve top-K suggestions from a compact prefix index, rebuild from aggregated search logs, and overlay fresh trends with strict latency and safety controls.",
+  "opening": "The read path must be extremely fast, so I would precompute the top K suggestions for each relevant prefix in a trie or prefix-key store and serve it from memory/cache. The write/data path is separate: search/query events enter a log, are normalized and aggregated by frequency, recency, locale, and quality, then a builder creates a new immutable prefix index. The index is rolled out atomically by version. To capture breaking trends between batch builds, a small real-time delta store is merged with the baseline at query time under a tight deadline. Suggestions are filtered for policy, spelling, locale, and personalization, and popularity uses time decay so old queries do not dominate forever.",
+  "ask": [
+    "Prefix only, typo tolerance, or semantic suggestions?",
+    "Global, locale-specific, personalized, or all three?",
+    "What is the p99 latency and freshness target?",
+    "How are harmful, private, or low-quality queries filtered?"
+  ],
+  "requirements": {
+    "functional": [
+      "Return top K for prefix",
+      "Update popularity",
+      "Locale/personalization",
+      "Safety filtering"
+    ],
+    "nonFunctional": [
+      "Very low p99 latency",
+      "High QPS",
+      "Fresh trends",
+      "Compact memory",
+      "Safe output"
+    ]
+  },
+  "scale": [
+    "Keystroke QPS can be several times search QPS because each query produces multiple prefixes.",
+    "Precompute only meaningful prefixes—often from length 2 or 3—and cache top K at nodes.",
+    "Index versions are immutable so rollout and rollback are atomic."
+  ],
+  "flows": [
+    {
+      "name": "Query",
+      "nodes": [
+        "Keystroke",
+        "Edge/API",
+        "Prefix cache/index",
+        "Trend delta",
+        "Policy/personalization",
+        "Top K"
+      ]
+    },
+    {
+      "name": "Build",
+      "nodes": [
+        "Search events",
+        "Normalize/filter",
+        "Aggregate + time decay",
+        "Trie/index builder",
+        "Validation",
+        "Versioned rollout"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Data structure",
+      "default": "Trie/prefix FST or prefix-key store with cached top K.",
+      "why": "Lookup is proportional to prefix length and avoids scanning all candidates.",
+      "switch": "Search engine completion suggester for fuzzy matching, multilingual analysis, and operational convenience."
+    },
+    {
+      "topic": "Batch or real time",
+      "default": "Immutable batch baseline plus bounded real-time overlay.",
+      "why": "Batch gives quality and compactness; overlay gives freshness without rebuilding constantly.",
+      "switch": "Pure batch for stable enterprise terms; streaming-heavy for news/trends."
+    },
+    {
+      "topic": "Sharding",
+      "default": "Shard by normalized prefix range or first characters, with replicas for hot ranges.",
+      "why": "Query routing is deterministic.",
+      "switch": "Replicate the whole compact index when it fits in memory; this simplifies latency and availability."
+    },
+    {
+      "topic": "Personalization",
+      "default": "Merge a small user/segment candidate list after global retrieval.",
+      "why": "A fully personalized trie per user is too costly.",
+      "switch": "Disable or privacy-gate personalization for sensitive contexts."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Ranking",
+      "points": [
+        "Combine frequency, recency decay, click/success quality, locale, and policy score.",
+        "Use stable tie-breaking to avoid flicker between keystrokes.",
+        "Penalize spam/manipulation and repeated bot traffic."
+      ]
+    },
+    {
+      "title": "Index rollout",
+      "points": [
+        "Build offline, validate coverage/size/safety, publish a version manifest, then switch readers atomically.",
+        "Keep previous version warm for rollback.",
+        "Warm caches before full traffic cutover."
+      ]
+    },
+    {
+      "title": "Privacy",
+      "points": [
+        "Apply k-anonymity/minimum-count thresholds before a query becomes public.",
+        "Remove PII and sensitive terms from training logs.",
+        "Use differential/privacy-aware aggregation where required."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Trending overlay is unavailable",
+      "response": "Serve immutable baseline; autocomplete should remain available with reduced freshness."
+    },
+    {
+      "risk": "Bad index release",
+      "response": "Versioned atomic rollout, safety validation, canary traffic, and instant rollback."
+    },
+    {
+      "risk": "Hot prefix overload",
+      "response": "Replicate/cache top prefixes at edge and coalesce identical requests."
+    },
+    {
+      "risk": "Private query leaks into suggestions",
+      "response": "PII filtering, minimum support thresholds, delayed publication, and audit/red-team testing."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why cache top K at every trie node?",
+      "a": "Then a lookup walks the prefix and returns immediately rather than traversing the entire subtree and sorting at request time. The trade-off is extra build-time memory."
+    },
+    {
+      "q": "How do you handle typos?",
+      "a": "Use fuzzy candidate generation—edit-distance automata, n-grams, or a search engine suggester—then rank under a strict candidate/latency budget."
+    },
+    {
+      "q": "How do you update without downtime?",
+      "a": "Build an immutable version, distribute and warm it, switch a small manifest/pointer atomically, and retain the old version for rollback."
+    },
+    {
+      "q": "How do you prevent manipulation?",
+      "a": "Aggregate authenticated/quality-weighted events, rate-limit sources, detect bot bursts, use time decay and trust features, and require minimum independent users."
+    }
+  ],
+  "mistakes": [
+    "Scanning a database with LIKE prefix at internet scale",
+    "Rebuilding the only live trie in place",
+    "Ignoring keystroke amplification",
+    "Publishing rare queries without privacy thresholds"
+  ],
+  "seniorSignal": "Separate candidate generation, ranking, freshness overlay, safety, and immutable rollout. Treat autocomplete as a high-QPS serving system plus an offline data product.",
+  "implementation": [
+    "Compact trie/FST loaded in-process or Redis for smaller scale",
+    "Kafka search-event stream; Flink/Spark aggregation",
+    "Versioned object-store index artifacts",
+    "Edge cache for hot prefixes and circuit-broken personalization"
+  ],
+  "related": [
+    9,
+    11,
+    20,
+    21,
+    24
+  ],
+  "tags": [
+    "trie",
+    "top K",
+    "prefix",
+    "ranking",
+    "privacy",
+    "streaming"
+  ],
+  "repoTitle": "Search Autocomplete",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/13.%20Search%20Autocomplete"
+}
