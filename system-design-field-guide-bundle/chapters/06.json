@@ -1,0 +1,189 @@
+{
+  "id": 6,
+  "title": "Distributed Key-Value Store",
+  "category": "Storage & Messaging",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 50,
+  "oneLine": "Partition by consistent hashing, replicate across failure domains, use configurable quorums, and reconcile replicas with versioning, gossip, hinted handoff, and Merkle trees.",
+  "opening": "I would first decide whether the store is CP or AP for the target operations. For a Dynamo-style highly available store, keys are partitioned with consistent hashing and replicated to N nodes across failure domains. Reads and writes use configurable quorums R and W; choosing R + W greater than N creates overlap, but conflict handling and failure semantics still need to be defined. Each node uses a write-optimized LSM path—commit log, memtable, immutable SSTables—with Bloom filters and compaction for reads. Membership and liveness are distributed by gossip, temporary failures use hinted handoff, and background anti-entropy compares Merkle trees. Values carry versions such as vector clocks or logical timestamps so concurrent writes can be detected and reconciled rather than silently overwritten.",
+  "ask": [
+    "What operations and maximum key/value sizes are required?",
+    "Is availability or linearizable consistency more important during partition?",
+    "What read/write latency and throughput are expected?",
+    "Must we support range scans, transactions, secondary indexes, TTL, or compare-and-set?"
+  ],
+  "requirements": {
+    "functional": [
+      "PUT/GET/DELETE",
+      "Replication",
+      "Version/conflict handling",
+      "Node membership and recovery"
+    ],
+    "nonFunctional": [
+      "Horizontal scale",
+      "High availability",
+      "Durability",
+      "Tunable consistency",
+      "Predictable tail latency"
+    ]
+  },
+  "scale": [
+    "Partition count should greatly exceed node count so ownership can move in small units.",
+    "Replication factor N=3 is a common starting point, but choose it from durability and failure-domain targets.",
+    "R and W are latency/consistency knobs; they do not remove the need for versioning and read repair."
+  ],
+  "flows": [
+    {
+      "name": "Write path",
+      "nodes": [
+        "Client / coordinator",
+        "Preference list",
+        "W replica ACKs",
+        "Commit log",
+        "Memtable",
+        "SSTable + compaction"
+      ]
+    },
+    {
+      "name": "Read path",
+      "nodes": [
+        "Coordinator",
+        "R replicas",
+        "Cache / Bloom filters",
+        "SSTables",
+        "Version reconcile",
+        "Read repair"
+      ]
+    },
+    {
+      "name": "Repair path",
+      "nodes": [
+        "Gossip membership",
+        "Hinted handoff",
+        "Merkle comparison",
+        "Range repair",
+        "Convergence"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "CAP posture",
+      "default": "Choose AP for carts/sessions/telemetry; choose CP for locks, uniqueness, and money-like invariants.",
+      "why": "During a partition, accepting writes on both sides conflicts with a single authoritative order.",
+      "switch": "Expose different consistency levels per operation when the product can tolerate the complexity."
+    },
+    {
+      "topic": "Quorum",
+      "default": "N=3 with R/W tuned to read or write latency; use strong leader-based reads for truly linearizable operations.",
+      "why": "Quorum overlap improves freshness but sloppy quorums and concurrent writes can still create conflicts.",
+      "switch": "Local quorum per region for latency plus asynchronous cross-region replication when global strong consistency is unnecessary."
+    },
+    {
+      "topic": "Storage engine",
+      "default": "LSM tree for high write throughput and append-friendly durability.",
+      "why": "Sequential writes and batching outperform random in-place updates at scale.",
+      "switch": "B-tree engines fit read-heavy workloads with range scans and lower compaction pressure."
+    },
+    {
+      "topic": "Conflict resolution",
+      "default": "Detect concurrent versions and apply domain-specific merge or last-write only when acceptable.",
+      "why": "Blind last-write-wins can lose valid updates and wall clocks can skew.",
+      "switch": "Use CRDTs for mergeable counters/sets or a leader/consensus group for non-mergeable invariants."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "LSM mechanics",
+      "points": [
+        "Acknowledge only after durable log policy is satisfied.",
+        "Flush sorted memtables to SSTables; Bloom filters skip files that cannot contain the key.",
+        "Compaction trades write amplification and I/O for bounded read amplification and reclaimed tombstones."
+      ]
+    },
+    {
+      "title": "Failure recovery",
+      "points": [
+        "Sloppy quorum writes to healthy fallback nodes and stores a hint for the intended replica.",
+        "Hinted handoff repairs short outages; Merkle-tree anti-entropy repairs long divergence.",
+        "Use repair throttling so recovery does not overload foreground traffic."
+      ]
+    },
+    {
+      "title": "Versioning",
+      "points": [
+        "Vector clocks capture causality but metadata can grow; prune or use dotted versions.",
+        "Hybrid logical clocks provide sortable time with bounded physical-clock reliance.",
+        "Read repair must not overwrite a genuinely concurrent value without a resolution rule."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Network partition creates siblings",
+      "response": "Return/merge versions, apply domain reconciliation, or route the operation through a CP path."
+    },
+    {
+      "risk": "Compaction causes p99 spikes",
+      "response": "Rate-limit compaction, isolate I/O, stagger jobs, and monitor write/read amplification."
+    },
+    {
+      "risk": "Coordinator or node churn",
+      "response": "Any node can coordinate, membership is gossiped, and ownership uses stable epochs/preference lists."
+    },
+    {
+      "risk": "Tombstone resurrection",
+      "response": "Use repair windows and garbage-collection grace periods so all replicas see deletions before tombstones are removed."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Does R + W > N guarantee strong consistency?",
+      "a": "It guarantees quorum overlap under the assumed replica set, but not automatically linearizability—sloppy quorum, concurrent writes, stale topology, and conflict resolution still matter. A leader/consensus protocol is clearer for strict ordering."
+    },
+    {
+      "q": "How do you add a node?",
+      "a": "Assign virtual-token ranges, stream data from current owners, serve through the old owner or dual-read during transfer, validate, then advance the ownership epoch."
+    },
+    {
+      "q": "What is a Merkle tree used for?",
+      "a": "It compares hashes of key ranges so replicas identify divergent subranges without transferring the entire dataset, then repair only those ranges."
+    },
+    {
+      "q": "Why use a Bloom filter?",
+      "a": "It can say a key is definitely absent or possibly present, avoiding unnecessary SSTable reads. False positives cost an extra lookup; false negatives are not allowed."
+    }
+  ],
+  "mistakes": [
+    "Saying CAP means a system can only ever have two properties",
+    "Treating last-write-wins as universally safe",
+    "Forgetting tombstones and compaction behavior",
+    "Claiming quorum overlap alone gives exactly one version"
+  ],
+  "seniorSignal": "Separate client consistency, replication protocol, conflict semantics, and storage-engine mechanics. Explain how the system converges after failures without destroying foreground latency.",
+  "implementation": [
+    "Cassandra/Dynamo-style reference for AP; etcd/Spanner-like consensus for CP",
+    "LSM concepts map to RocksDB/Cassandra storage engines",
+    "Java coordinator with async replica calls, deadlines, and per-key version metadata",
+    "Background repair jobs with token-range throttling and observability"
+  ],
+  "related": [
+    5,
+    7,
+    19,
+    20,
+    24,
+    27
+  ],
+  "tags": [
+    "CAP",
+    "quorum",
+    "LSM",
+    "vector clock",
+    "Merkle tree",
+    "gossip"
+  ],
+  "repoTitle": "Key-Value Store",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/06.%20Key-Value%20Store"
+}
