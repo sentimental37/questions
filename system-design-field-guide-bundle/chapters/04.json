@@ -1,0 +1,177 @@
+{
+  "id": 4,
+  "title": "Rate Limiter",
+  "category": "Foundations",
+  "kind": "Design Case",
+  "difficulty": "Core",
+  "time": 40,
+  "oneLine": "Enforce a policy close to the edge with atomic counters, bounded state, layered limits, and an explicit fail-open/fail-closed decision.",
+  "opening": "I would place a coarse limiter at the gateway for DDoS and tenant protection, and optionally a finer limiter inside the service for business operations. My default algorithm is token bucket because it supports controlled bursts while enforcing a long-term rate. Rules are versioned and cached locally; shared usage state lives in a low-latency store such as Redis, updated atomically with Lua. The key can combine tenant, user, endpoint, IP, or API key, depending on the threat and fairness model. I would return 429 with retry metadata, emit decision telemetry, and decide per endpoint whether a limiter outage should fail open, fail closed, or fall back to conservative local quotas.",
+  "ask": [
+    "What is being limited: user, tenant, IP, token, endpoint, cost unit, or a combination?",
+    "Are short bursts allowed, and what fairness guarantee is required?",
+    "Is the limiter global across regions or regional?",
+    "What should happen if the limiter store is unavailable?"
+  ],
+  "requirements": {
+    "functional": [
+      "Evaluate a request against rules",
+      "Update quota atomically",
+      "Return remaining/retry information",
+      "Support rule changes"
+    ],
+    "nonFunctional": [
+      "Sub-millisecond to low-millisecond overhead",
+      "Distributed correctness",
+      "High availability",
+      "Bounded memory and abuse resistance"
+    ]
+  },
+  "scale": [
+    "Estimate checks per second, not just accepted requests; rejected attacks may dominate.",
+    "State cardinality = active keys × windows/buckets; use TTL to bound it.",
+    "A global exact limiter adds cross-region latency—often regional allocation plus a global budget is the better trade-off."
+  ],
+  "flows": [
+    {
+      "name": "Decision path",
+      "nodes": [
+        "Client",
+        "Edge / gateway",
+        "Local rule cache",
+        "Atomic quota store",
+        "Allow or 429",
+        "Metrics stream"
+      ]
+    },
+    {
+      "name": "Control plane",
+      "nodes": [
+        "Admin policy",
+        "Versioned rule store",
+        "Config distribution",
+        "Gateway caches",
+        "Audit"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Algorithm",
+      "default": "Token bucket for most APIs; sliding-window counter when boundary fairness matters more.",
+      "why": "Token bucket is compact, fast, and naturally supports controlled bursts.",
+      "switch": "Leaky bucket for a fixed output rate; exact sliding log only for small cardinality/high-value limits."
+    },
+    {
+      "topic": "Where to enforce",
+      "default": "Layer edge, gateway, and domain-specific limits.",
+      "why": "Each layer protects a different scarce resource and avoids sending obvious abuse deeper.",
+      "switch": "A library/sidecar may be appropriate when gateways cannot express business cost units."
+    },
+    {
+      "topic": "Global versus regional",
+      "default": "Allocate regional budgets with periodic global reconciliation.",
+      "why": "This preserves low latency and availability while bounding global overrun.",
+      "switch": "Use a globally coordinated store for high-value operations where exceeding the quota is unacceptable."
+    },
+    {
+      "topic": "Failure policy",
+      "default": "Fail open for low-risk reads; fail closed or conservative-local for money movement, authentication, and abuse-sensitive writes.",
+      "why": "The cost of denial versus excess traffic differs by endpoint.",
+      "switch": "Use an emergency bypass with strict audit for operational recovery."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Atomic token bucket",
+      "points": [
+        "Store token count and last-refill timestamp in one key.",
+        "A Lua script computes refill, checks cost, decrements, and updates TTL atomically.",
+        "Use server time or monotonic semantics to reduce clock skew issues."
+      ]
+    },
+    {
+      "title": "Hierarchical limits",
+      "points": [
+        "Check system capacity, tenant quota, user quota, and endpoint cost in a deterministic order.",
+        "Reject early on the cheapest check.",
+        "Expose which policy denied the request without leaking sensitive abuse signals."
+      ]
+    },
+    {
+      "title": "Client behavior",
+      "points": [
+        "Return 429 and Retry-After or reset time.",
+        "Use jittered exponential backoff; do not encourage synchronized retries.",
+        "Offer quota headers carefully because exact remaining counts can be expensive or security-sensitive."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Race condition allows quota overshoot",
+      "response": "Use a single atomic script/transaction; do not GET then SET in separate calls."
+    },
+    {
+      "risk": "Hot tenant saturates one Redis shard",
+      "response": "Use local pre-allocation, shard large tenants by sub-key, or dedicate capacity while maintaining a global cap."
+    },
+    {
+      "risk": "Fixed-window boundary burst",
+      "response": "Use token bucket or sliding-window counter; test traffic at window edges."
+    },
+    {
+      "risk": "Limiter outage blocks the platform",
+      "response": "Per-route fallback policy, local emergency buckets, circuit breaker, and auditable override."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Token bucket versus leaky bucket?",
+      "a": "Token bucket limits the long-term rate while permitting a configured burst. Leaky bucket shapes output at a steady drain rate, which is useful when the downstream cannot absorb bursts."
+    },
+    {
+      "q": "How do you rate-limit a request with variable cost?",
+      "a": "Charge tokens based on estimated work—rows scanned, model tokens, bytes, or operation class. Keep the cost function stable and versioned so clients and operators can reason about it."
+    },
+    {
+      "q": "Can the limiter be perfectly global and highly available?",
+      "a": "Not without paying coordination latency or accepting bounded inconsistency during partitions. I would quantify tolerated overrun and choose regional budgets or a strongly consistent global path accordingly."
+    },
+    {
+      "q": "How do you roll out new rules safely?",
+      "a": "Version policies, dry-run them first, compare would-block metrics, canary by tenant, then enforce. Keep instant rollback and audit history."
+    }
+  ],
+  "mistakes": [
+    "Using non-atomic Redis operations",
+    "Rate-limiting only by IP behind NAT or proxies",
+    "Ignoring cost-weighted operations",
+    "Saying fail open or closed globally instead of per route"
+  ],
+  "seniorSignal": "Treat rate limiting as a policy control plane plus a low-latency data plane. Discuss fairness, bounded inconsistency, rollout, and endpoint-specific failure behavior.",
+  "implementation": [
+    "Redis Cluster + Lua script or a purpose-built limiter service",
+    "Spring Cloud Gateway/Envoy filters for edge enforcement",
+    "OpenTelemetry counters for allowed, blocked, fallback, and store latency",
+    "Policy version pushed through a config stream and cached locally"
+  ],
+  "related": [
+    1,
+    5,
+    8,
+    9,
+    10,
+    28
+  ],
+  "tags": [
+    "token bucket",
+    "Redis",
+    "gateway",
+    "abuse",
+    "quota",
+    "Lua"
+  ],
+  "repoTitle": "Rate Limiter",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/04.%20Rate%20Limiter"
+}
