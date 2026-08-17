@@ -1,0 +1,184 @@
+{
+  "id": 23,
+  "title": "Distributed Email Service",
+  "category": "Transactional & Financial",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 60,
+  "oneLine": "Separate SMTP ingress/egress from mailbox metadata, object attachments, search, and realtime sync; make delivery retryable while protecting reputation and abuse boundaries.",
+  "opening": "I would split mail transport from mailbox serving. Inbound SMTP gateways validate the envelope, apply connection/reputation controls, scan spam and malware, persist the raw MIME message durably, then enqueue mailbox delivery. Metadata—folder, thread, sender, recipients, flags, timestamps—is sharded primarily by user ID; large bodies and attachments stay in object storage. A search pipeline builds a per-user index. Web/mobile clients use HTTPS for mailbox APIs and push hints for new mail, but synchronize from a durable change cursor. Outbound mail is accepted into a durable queue, authenticated and scanned, then sent through warmed IP/domain pools with retry rules based on SMTP status. Bounces and feedback loops update reputation and delivery status. Transactional and bulk traffic are isolated so abuse or a campaign cannot damage critical mail.",
+  "ask": [
+    "Consumer mailbox, transactional sender, or both?",
+    "Send/receive/search/folders/threading and attachment limits?",
+    "Retention, compliance, encryption, and data locality?",
+    "Delivery latency, volume, and anti-spam/reputation requirements?"
+  ],
+  "requirements": {
+    "functional": [
+      "SMTP send/receive",
+      "Mailbox/folders/threads",
+      "Search",
+      "Attachments",
+      "Sync and notifications"
+    ],
+    "nonFunctional": [
+      "Durability",
+      "Deliverability",
+      "Abuse resistance",
+      "Per-user consistency",
+      "Large-scale storage"
+    ]
+  },
+  "scale": [
+    "Mailbox metadata and search operations may dominate request QPS; attachment bytes dominate storage/egress.",
+    "Shard by user so mailbox list/update operations stay local; a message addressed to many users creates per-mailbox references.",
+    "SMTP retries may last hours/days, so queue/storage and status lifecycle must support long delays."
+  ],
+  "flows": [
+    {
+      "name": "Inbound",
+      "nodes": [
+        "Remote SMTP",
+        "MX / ingress gateway",
+        "Reputation + SPF/DKIM/DMARC",
+        "Spam/virus scan",
+        "Raw MIME store",
+        "Mailbox delivery queue",
+        "Metadata + search",
+        "Push hint"
+      ]
+    },
+    {
+      "name": "Outbound",
+      "nodes": [
+        "Compose/API",
+        "Outbox/idempotency",
+        "Policy/scan",
+        "Priority queue",
+        "Sending MTA/IP pool",
+        "Remote MX",
+        "Bounce/feedback",
+        "Status/reputation"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Storage split",
+      "default": "Metadata in sharded database, raw body/attachments in durable object storage, search in derived index.",
+      "why": "Each workload has different access and scaling characteristics.",
+      "switch": "Small systems can store body in a relational/blob store first, but preserve clear boundaries."
+    },
+    {
+      "topic": "Mailbox shard key",
+      "default": "User/mailbox ID.",
+      "why": "Most reads, flags, folders, and sync are per user and require consistency.",
+      "switch": "Large enterprise tenants may receive dedicated shards and secondary partitions."
+    },
+    {
+      "topic": "Threading",
+      "default": "Use message headers plus normalized subject/participants heuristics, stored as derived thread metadata.",
+      "why": "Internet mail lacks one globally reliable thread ID.",
+      "switch": "Internal-only mail can use a controlled conversation ID."
+    },
+    {
+      "topic": "Realtime sync",
+      "default": "Push notification as hint, durable per-user change log/cursor as truth.",
+      "why": "Devices can be offline and push is lossy.",
+      "switch": "IMAP compatibility can be layered over the same mailbox state with protocol-specific sequence semantics."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Deliverability",
+      "points": [
+        "Separate transactional, marketing, and untrusted tenant IP/domain pools.",
+        "Warm new IPs gradually; sign with DKIM, publish SPF/DMARC, process complaints/bounces quickly.",
+        "Throttle by destination domain and adapt to transient 4xx responses."
+      ]
+    },
+    {
+      "title": "Mailbox mutations",
+      "points": [
+        "Flags/folder moves are idempotent and versioned per user.",
+        "A durable change sequence supports device sync and conflict resolution.",
+        "Read/unread counters are derived and periodically reconciled."
+      ]
+    },
+    {
+      "title": "Security",
+      "points": [
+        "Sandbox MIME parsers and attachment scanners; never trust content type or filenames.",
+        "Encrypt in transit/at rest and use scoped object URLs.",
+        "Protect account recovery, forwarding rules, and OAuth tokens as high-risk controls."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Remote server temporarily rejects mail",
+      "response": "Classify 4xx as retry with exponential schedule and domain throttling; 5xx becomes permanent bounce."
+    },
+    {
+      "risk": "Duplicate inbound delivery",
+      "response": "Use SMTP/message delivery IDs and idempotent mailbox insertion; preserve legitimate same-Message-ID edge cases carefully."
+    },
+    {
+      "risk": "Search index lags/corrupts",
+      "response": "Mailbox store remains source of truth; rebuild per-user index from raw/metadata and expose freshness."
+    },
+    {
+      "risk": "Tenant spam damages shared reputation",
+      "response": "Tenant quotas, behavior detection, isolated sending pools, rapid suspension, and feedback-loop processing."
+    }
+  ],
+  "questions": [
+    {
+      "q": "How do you shard a message sent to 100K recipients?",
+      "a": "Store raw MIME/content once, then fan out lightweight mailbox references/metadata by recipient shard. Delivery is asynchronous and idempotent; large-list sending also needs consent and rate controls."
+    },
+    {
+      "q": "How do you support search?",
+      "a": "An asynchronous per-user inverted index over authorized mailbox content. Query always scopes by user/tenant, and deletion/retention events remove indexed documents with reconciliation."
+    },
+    {
+      "q": "Why is SMTP delivery not exactly once?",
+      "a": "Timeouts can occur after the remote server accepted the message, so retry may duplicate. Use stable IDs and recipient-side dedupe where possible, but Internet SMTP fundamentally has uncertainty."
+    },
+    {
+      "q": "How do clients sync after being offline?",
+      "a": "They present the last mailbox change cursor, receive ordered deltas or a reset snapshot if expired, then advance the cursor. Push only signals that a delta exists."
+    }
+  ],
+  "mistakes": [
+    "One database table for metadata, bodies, attachments, and search",
+    "Treating SMTP timeout as definite failure",
+    "Ignoring sender reputation/IP isolation",
+    "Using push as authoritative mailbox sync"
+  ],
+  "seniorSignal": "Balance protocol uncertainty, mailbox consistency, storage/search separation, reputation economics, and hostile-content isolation. Delivery status must be semantically honest.",
+  "implementation": [
+    "Postfix/SMTP edge concepts with durable Kafka queues",
+    "Cassandra/relational mailbox metadata sharded by user",
+    "S3-compatible raw MIME/attachment store",
+    "Elasticsearch/OpenSearch per-tenant index; WebSocket push plus cursor API"
+  ],
+  "related": [
+    10,
+    12,
+    15,
+    19,
+    20,
+    24
+  ],
+  "tags": [
+    "SMTP",
+    "mailbox",
+    "deliverability",
+    "spam",
+    "search",
+    "attachments"
+  ],
+  "repoTitle": "Distributed Email Service",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/23.%20Distributed%20Email%20Service"
+}
