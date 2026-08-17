@@ -1,0 +1,179 @@
+{
+  "id": 15,
+  "title": "Google Drive / File Sync",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 55,
+  "oneLine": "Store immutable content blocks separately from mutable metadata, upload in resumable chunks, and synchronize devices from a durable change log with cursor-based delta sync.",
+  "opening": "I would separate file content from file metadata. Clients upload fixed-size chunks directly to a block/object store using a resumable session and per-block hashes. Metadata tracks file identity, parent, owner, version, permissions, block manifest, and deletion state. A metadata transaction commits a new immutable version and appends a change event. Devices keep a sync cursor and request deltas after that cursor; a push channel only tells them that changes exist. Content-addressed blocks enable deduplication and avoid re-uploading unchanged chunks. Concurrent edits use optimistic version checks—merge when the file type supports it, otherwise create a conflict copy. Deletes are tombstones, old versions move to cold storage, and every client operation is idempotent.",
+  "ask": [
+    "File storage, collaborative editing, or both?",
+    "Maximum file size and supported devices/offline mode?",
+    "Sharing model and permission inheritance?",
+    "Version history, deduplication, and conflict semantics?"
+  ],
+  "requirements": {
+    "functional": [
+      "Upload/download",
+      "Folders/share",
+      "Version history",
+      "Multi-device sync",
+      "Offline edits"
+    ],
+    "nonFunctional": [
+      "Durability",
+      "Efficient delta transfer",
+      "Consistency of metadata",
+      "Security",
+      "Global availability"
+    ]
+  },
+  "scale": [
+    "Large files require multipart upload; small-file metadata QPS may dominate content bandwidth.",
+    "Choose chunk size as a trade-off among dedupe granularity, manifest size, and request overhead—around a few MB is common.",
+    "A sync cursor/change log prevents full directory scans on every reconnect."
+  ],
+  "flows": [
+    {
+      "name": "Upload",
+      "nodes": [
+        "Client chunking/hash",
+        "Upload session",
+        "Missing-block check",
+        "Block/object store",
+        "Metadata commit",
+        "Change-log event"
+      ]
+    },
+    {
+      "name": "Sync",
+      "nodes": [
+        "Push hint",
+        "Client cursor",
+        "Delta API",
+        "Metadata changes",
+        "Download missing blocks",
+        "Advance cursor"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Content model",
+      "default": "Immutable content-addressed blocks plus mutable/versioned metadata.",
+      "why": "It supports dedupe, resumability, history, and safe concurrent publication.",
+      "switch": "Whole-object storage is simpler when files are small and dedupe/delta upload is unnecessary."
+    },
+    {
+      "topic": "Sync protocol",
+      "default": "Durable per-user/team change log with cursor; push is only a hint.",
+      "why": "Push can be lost and devices may be offline for long periods.",
+      "switch": "Periodic full reconciliation remains a safety net for cursor expiry or corruption."
+    },
+    {
+      "topic": "Conflict resolution",
+      "default": "Optimistic version precondition and conflict copy for opaque binaries.",
+      "why": "Automatic merging arbitrary files can destroy user data.",
+      "switch": "Use OT/CRDT/domain merge for collaborative structured documents."
+    },
+    {
+      "topic": "Deduplication",
+      "default": "Deduplicate within a tenant/security boundary using hashes.",
+      "why": "Cross-tenant dedupe can leak whether another user owns a file and complicate encryption.",
+      "switch": "Convergent encryption requires careful threat analysis and is often not worth the privacy risk."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Atomic publication",
+      "points": [
+        "Blocks may upload independently, but a metadata transaction makes a complete version visible.",
+        "Unreferenced blocks are garbage-collected after a grace period.",
+        "Manifest and content hashes protect integrity."
+      ]
+    },
+    {
+      "title": "Permissions",
+      "points": [
+        "Authorize every metadata/content reference, not only folder listing.",
+        "Cache entitlements with version/invalidation and prevent stale sharing tokens.",
+        "Audit share, download, delete, and restore operations."
+      ]
+    },
+    {
+      "title": "Offline sync",
+      "points": [
+        "Keep a local operation journal with idempotency IDs.",
+        "Replay against current version; resolve conflicts explicitly.",
+        "Use exponential backoff and bandwidth-aware chunk scheduling."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Client completes metadata before all blocks exist",
+      "response": "Server verifies referenced block hashes/ownership before atomic version commit."
+    },
+    {
+      "risk": "Push notification lost",
+      "response": "Cursor-based pull is authoritative; reconnect and periodic checks fetch all missed deltas."
+    },
+    {
+      "risk": "Concurrent edits overwrite data",
+      "response": "If-Match/version precondition, conflict copy or domain merge, and visible history."
+    },
+    {
+      "risk": "Orphan blocks consume storage",
+      "response": "Reference tracking, delayed mark-and-sweep garbage collection, and repair scans."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why is push not the sync source of truth?",
+      "a": "Devices disconnect and notifications can be dropped or duplicated. The durable ordered change log plus cursor is authoritative; push only reduces detection latency."
+    },
+    {
+      "q": "How do you upload only changed parts?",
+      "a": "Chunk locally, hash each block, ask which hashes already exist, upload missing blocks, then commit a new manifest. Content-defined chunking improves dedupe when bytes shift but costs more CPU/complexity."
+    },
+    {
+      "q": "How do you delete a shared file?",
+      "a": "Use metadata tombstones and clear ownership semantics. Deleting a folder entry may not delete content referenced elsewhere; garbage collection occurs only when no retained version references the blocks."
+    },
+    {
+      "q": "How do you recover from a corrupt cursor?",
+      "a": "Expire cursors with a reset signal and run a bounded full metadata reconciliation or snapshot, then resume deltas from a new checkpoint."
+    }
+  ],
+  "mistakes": [
+    "Treating WebSocket push as reliable synchronization",
+    "Overwriting on last writer without conflict handling",
+    "Making partially uploaded content visible",
+    "Cross-user dedupe without privacy analysis"
+  ],
+  "seniorSignal": "Center the design on immutable versions, authoritative metadata transactions, cursor-based reconciliation, explicit conflict semantics, and safe garbage collection.",
+  "implementation": [
+    "Presigned multipart upload to S3-compatible storage",
+    "PostgreSQL/Spanner-like metadata with version preconditions and change log",
+    "Kafka notification stream plus WebSocket/SSE hints",
+    "Local client journal and chunk hash cache"
+  ],
+  "related": [
+    12,
+    14,
+    19,
+    23,
+    24
+  ],
+  "tags": [
+    "file sync",
+    "chunks",
+    "dedupe",
+    "cursor",
+    "versioning",
+    "offline"
+  ],
+  "repoTitle": "Google Drive",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/15.%20Google%20Drive"
+}
