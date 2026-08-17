@@ -1,0 +1,181 @@
+{
+  "id": 14,
+  "title": "YouTube / Video Platform",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 55,
+  "oneLine": "Upload once to durable object storage, run an asynchronous transcoding DAG, package multiple renditions, and stream segments through a CDN with adaptive bitrate.",
+  "opening": "I would split upload, processing, metadata, and playback. The client creates a video record and receives a multipart/resumable upload session to object storage. Completion emits an event into a transcoding DAG: validate and scan, split into chunks, encode multiple codecs/resolutions/bitrates, generate thumbnails/captions, package HLS or DASH manifests and segments, then publish atomically. Metadata lives in a relational or document store; large media stays in object storage. Playback fetches metadata and an authorized manifest, then the player selects bitrate adaptively while segments are served from CDN. Popular content is edge-cached; long-tail and originals use tiered storage. Every processing task is idempotent, retryable, and versioned so a new codec can be backfilled safely.",
+  "ask": [
+    "Upload and on-demand playback only, or live streaming too?",
+    "Which resolutions/codecs/devices and DRM requirements?",
+    "How quickly must a video become playable?",
+    "What are upload volume, watch traffic, retention, and regional constraints?"
+  ],
+  "requirements": {
+    "functional": [
+      "Resumable upload",
+      "Transcode/package",
+      "Playback/search/metadata",
+      "Thumbnail/caption/moderation"
+    ],
+    "nonFunctional": [
+      "High durability",
+      "Global low-start latency",
+      "Elastic compute",
+      "Cost efficiency",
+      "Content security"
+    ]
+  },
+  "scale": [
+    "Egress dominates cost: watch minutes × delivered bitrate is more important than metadata QPS.",
+    "Transcoding expands one original into multiple renditions; estimate compute and storage multiplier by ladder.",
+    "Chunked segments allow CDN caching and adaptive bitrate without downloading a whole file."
+  ],
+  "flows": [
+    {
+      "name": "Upload and publish",
+      "nodes": [
+        "Creator",
+        "Upload session",
+        "Multipart object store",
+        "Completion event",
+        "Transcoding DAG",
+        "Renditions + manifest",
+        "Publish metadata"
+      ]
+    },
+    {
+      "name": "Playback",
+      "nodes": [
+        "Viewer",
+        "Playback API",
+        "Auth/entitlement",
+        "Manifest",
+        "CDN segments",
+        "Origin shield/object store",
+        "QoE telemetry"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Upload path",
+      "default": "Direct multipart upload to object storage using short-lived signed URLs.",
+      "why": "Application servers avoid proxying multi-GB payloads and resumability is native.",
+      "switch": "Proxy only when content inspection must occur before any bytes reach storage."
+    },
+    {
+      "topic": "Processing model",
+      "default": "Idempotent DAG of small tasks with durable state.",
+      "why": "Different renditions can run in parallel and failed work can resume selectively.",
+      "switch": "Single managed transcoding job for simpler moderate-scale deployments."
+    },
+    {
+      "topic": "Streaming protocol",
+      "default": "Segmented adaptive HLS/DASH with a bitrate ladder.",
+      "why": "The client adapts to bandwidth and CDN caches standard objects.",
+      "switch": "Low-latency live protocols need shorter segments/chunks and different delivery trade-offs."
+    },
+    {
+      "topic": "Codec strategy",
+      "default": "Provide a widely compatible baseline plus newer efficient codec for capable devices.",
+      "why": "Storage/transcode cost trades against ongoing egress savings and device support.",
+      "switch": "Per-title or per-shot encoding for high-volume content where bandwidth savings justify compute complexity."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Transcoding DAG",
+      "points": [
+        "Preprocessor validates container, extracts metadata, scans, and splits work.",
+        "Scheduler assigns CPU/GPU workers by codec/resolution and tracks task state.",
+        "Publish only after required renditions and manifest pass validation; optional renditions can arrive later."
+      ]
+    },
+    {
+      "title": "Playback quality",
+      "points": [
+        "Use origin shield and regional CDN to protect storage.",
+        "Player adapts from throughput/buffer; collect startup time, rebuffers, bitrate switches, and errors.",
+        "Signed manifests/URLs and DRM keys enforce access without putting authorization on every segment request."
+      ]
+    },
+    {
+      "title": "Cost control",
+      "points": [
+        "Tier originals and unpopular renditions to colder storage.",
+        "Encode only ladders demanded by device/content profile.",
+        "Deduplicate retries and use spot/preemptible capacity for non-urgent backfills."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Upload interrupted",
+      "response": "Multipart session, per-part checksum, resume token, and idempotent completion."
+    },
+    {
+      "risk": "One transcode task fails",
+      "response": "Retry only that DAG node, preserve intermediate artifacts, DLQ after classified attempts, and surface processing state."
+    },
+    {
+      "risk": "CDN miss storm",
+      "response": "Origin shield, request coalescing, pre-warm launch content, and bounded origin concurrency."
+    },
+    {
+      "risk": "Bad rendition published",
+      "response": "Automated media validation, immutable versioned manifests, canary playback, and rollback to previous package."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why not stream the original file?",
+      "a": "Devices and networks differ. Multiple segmented renditions enable adaptive bitrate, fast seek, CDN caching, and compatible codecs, while protecting the large origin object."
+    },
+    {
+      "q": "How does resumable upload work?",
+      "a": "The server creates an upload session; the client sends numbered parts directly to object storage with checksums; completion atomically assembles the object and emits one processing event."
+    },
+    {
+      "q": "How do you support a new codec?",
+      "a": "Version the processing graph and run an asynchronous backfill prioritized by watch volume. Publish the new rendition into a new manifest version without rewriting the original."
+    },
+    {
+      "q": "What is the source of truth during processing?",
+      "a": "A durable video-processing state machine plus immutable object artifacts. Queue delivery is only a trigger; task completion is recorded idempotently in durable state."
+    }
+  ],
+  "mistakes": [
+    "Sending large uploads through application servers",
+    "Treating transcoding as one unrecoverable job",
+    "Ignoring egress/CDN economics",
+    "Publishing a manifest before required artifacts are valid"
+  ],
+  "seniorSignal": "Separate the control plane from the byte path. Discuss resumability, atomic publication, idempotent DAG execution, QoE telemetry, origin protection, and cost per watched minute.",
+  "implementation": [
+    "Object storage multipart upload + signed URLs",
+    "Kafka/SQS trigger and workflow/DAG orchestrator with CPU/GPU workers",
+    "HLS/DASH manifests, CDN, origin shield, signed playback URLs",
+    "Relational metadata/state plus immutable media artifacts"
+  ],
+  "related": [
+    2,
+    10,
+    15,
+    19,
+    20,
+    24
+  ],
+  "tags": [
+    "video",
+    "transcoding",
+    "CDN",
+    "HLS",
+    "DASH",
+    "object storage"
+  ],
+  "repoTitle": "Youtube",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/14.%20Youtube"
+}
