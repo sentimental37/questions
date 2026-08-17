@@ -1,0 +1,186 @@
+{
+  "id": 1,
+  "title": "Scale from Zero to Millions",
+  "category": "Foundations",
+  "kind": "Foundation",
+  "difficulty": "Core",
+  "time": 35,
+  "oneLine": "Grow a simple application one bottleneck at a time: separate tiers, remove state, cache hot reads, add asynchronous work, replicate, then partition.",
+  "opening": "I would not begin with microservices or multi-region. I would start with a stateless application and one relational database, instrument it, and evolve only when measurements justify the next step. The normal progression is DNS and CDN at the edge, a load balancer in front of horizontally scaled stateless services, Redis for hot data, a replicated database for read scale and availability, and a queue for slow or bursty work. When the primary database becomes the write bottleneck, I would partition by a stable, high-cardinality key and make the consistency and rebalancing model explicit. At every stage I would call out failure handling, observability, capacity headroom, and what becomes the next bottleneck.",
+  "ask": [
+    "What is the expected DAU, read/write ratio, payload size, and peak-to-average multiplier?",
+    "Which operations require strong consistency and which may be eventually consistent?",
+    "Is this one region or multi-region, and what are the RTO/RPO expectations?",
+    "What is the current bottleneck: CPU, database connections, storage IOPS, network, or a downstream dependency?"
+  ],
+  "requirements": {
+    "functional": [
+      "Serve reads and writes",
+      "Support background work",
+      "Preserve user/session behavior while instances scale"
+    ],
+    "nonFunctional": [
+      "Horizontal scalability",
+      "High availability",
+      "Predictable p99 latency",
+      "Operability and graceful degradation"
+    ]
+  },
+  "scale": [
+    "Use a realistic peak multiplier—often 3–10× average rather than designing only for daily average.",
+    "Keep 30–50% headroom on critical tiers so an instance or availability zone can fail without immediate overload.",
+    "Estimate database connections and IOPS, not only HTTP QPS; they are common first bottlenecks."
+  ],
+  "flows": [
+    {
+      "name": "Synchronous request path",
+      "nodes": [
+        "Client",
+        "DNS / CDN",
+        "Load balancer",
+        "Stateless service",
+        "Redis cache",
+        "Primary / replicas"
+      ]
+    },
+    {
+      "name": "Asynchronous path",
+      "nodes": [
+        "Service",
+        "Durable queue",
+        "Worker pool",
+        "Database / object store",
+        "Notification or downstream"
+      ]
+    },
+    {
+      "name": "Operations path",
+      "nodes": [
+        "Apps",
+        "Logs + metrics + traces",
+        "Dashboards",
+        "Alerts",
+        "Capacity / autoscaling"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Vertical or horizontal scaling",
+      "default": "Scale vertically briefly, then horizontally behind a load balancer.",
+      "why": "Vertical scaling is fast operationally; horizontal scaling removes the single-machine ceiling and improves availability.",
+      "switch": "Keep a vertically scaled stateful core when coordination cost dominates or the workload needs very low latency."
+    },
+    {
+      "topic": "Cache strategy",
+      "default": "Cache-aside for read-heavy objects, with TTL, jitter, and explicit invalidation for critical updates.",
+      "why": "It is simple and keeps the database as source of truth while absorbing hot reads.",
+      "switch": "Use write-through for simpler read consistency, or event-driven invalidation when stale data is costly."
+    },
+    {
+      "topic": "Database scale",
+      "default": "Read replicas first; partition only when the write set or dataset no longer fits one primary.",
+      "why": "Sharding adds cross-shard transactions, rebalancing, hotspot, and operational complexity.",
+      "switch": "Partition earlier for tenant isolation, regulatory locality, or an obviously unbounded write workload."
+    },
+    {
+      "topic": "Multi-region",
+      "default": "Active-passive or read-local/write-home unless the business truly needs active-active writes.",
+      "why": "Single-writer ownership is easier to reason about and avoids conflict resolution on critical entities.",
+      "switch": "Use active-active with per-entity home regions, CRDTs, or conflict rules for globally distributed low-latency writes."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Statelessness",
+      "points": [
+        "Move session state into a shared store or signed token.",
+        "Make every instance interchangeable so autoscaling and failover are safe.",
+        "Keep idempotency state outside process memory for retried writes."
+      ]
+    },
+    {
+      "title": "Database evolution",
+      "points": [
+        "Separate read and write paths only after measuring replication lag tolerance.",
+        "Choose a shard key that is stable, high-cardinality, evenly distributed, and present in common queries.",
+        "Plan online resharding using logical ranges, consistent hashing, or a routing directory."
+      ]
+    },
+    {
+      "title": "Degradation",
+      "points": [
+        "Serve cached or partial results when optional dependencies fail.",
+        "Use timeouts, bounded retries, circuit breakers, bulkheads, and load shedding.",
+        "Protect the database with admission control rather than allowing every upstream retry through."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Cache stampede or hot key",
+      "response": "Single-flight requests, TTL jitter, request coalescing, replication of hot values, and a bounded fallback to the database."
+    },
+    {
+      "risk": "Replica lag causes stale reads",
+      "response": "Read-your-write routing to primary, version tokens, or route consistency-sensitive reads to the leader."
+    },
+    {
+      "risk": "One shard becomes hot",
+      "response": "Detect skew, split logical ranges, isolate celebrity tenants, or add a second-level key while preserving queryability."
+    },
+    {
+      "risk": "Queue backlog grows indefinitely",
+      "response": "Track age-of-oldest-message, autoscale on lag, apply producer backpressure, prioritize classes, and use a DLQ for poison messages."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why not start with microservices?",
+      "a": "They do not create scale by themselves. They add network calls, distributed failure modes, schema/version coordination, and operational load. Start with clear module boundaries; split a service when ownership, independent scaling, deployment cadence, or fault isolation justify it."
+    },
+    {
+      "q": "How do you make sessions stateless?",
+      "a": "Use an external session store keyed by an opaque token, or use short-lived signed tokens when the data can be embedded safely. Do not depend on sticky sessions for correctness; they are only an optimization."
+    },
+    {
+      "q": "How would you perform zero-downtime sharding?",
+      "a": "Introduce a routing layer, dual-write or change-capture during migration, backfill by logical ranges, verify checksums, switch reads per range, then stop old writes. Make every step resumable and observable."
+    },
+    {
+      "q": "What do you monitor first?",
+      "a": "User-facing latency and error rate, saturation, dependency latency, database connections/locks/replication lag, cache hit rate, queue lag, and capacity headroom. Tie alerts to SLO impact rather than raw resource spikes."
+    }
+  ],
+  "mistakes": [
+    "Listing components without explaining when each becomes necessary",
+    "Treating autoscaling as instant capacity",
+    "Ignoring database connection limits and downstream amplification",
+    "Claiming eventual consistency everywhere without identifying business invariants"
+  ],
+  "seniorSignal": "Narrate the design as an evolution driven by evidence. Explicitly state the invariant each component protects, the cost it adds, and how the system behaves during partial failure.",
+  "implementation": [
+    "Spring Boot or ASP.NET stateless APIs behind Kubernetes/Envoy",
+    "Redis with TTL jitter and Lua for atomic cache coordination",
+    "PostgreSQL primary/read replicas before considering sharding",
+    "Kafka for durable asynchronous workflows; OpenTelemetry for traces, metrics, and logs"
+  ],
+  "related": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    19
+  ],
+  "tags": [
+    "scaling",
+    "load balancing",
+    "cache",
+    "replication",
+    "sharding",
+    "multi-region"
+  ],
+  "repoTitle": "Scaling",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/01.%20Scaling"
+}
