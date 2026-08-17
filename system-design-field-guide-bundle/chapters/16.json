@@ -1,0 +1,178 @@
+{
+  "id": 16,
+  "title": "Proximity Service",
+  "category": "Geo & Realtime",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 45,
+  "oneLine": "Index relatively static places by spatial cells, search the user’s cell plus neighbors, then fetch and rank candidates by exact distance and business relevance.",
+  "opening": "For nearby businesses, the business data changes slowly while user locations are query inputs, so I would pre-index businesses spatially. The simplest production choice is geohash: encode latitude/longitude into hierarchical cells, index business IDs by a chosen precision, query the current cell and enough neighboring cells to cover the requested radius, then calculate exact distance and rank the candidates. Business details remain in a primary relational store and cache. I would choose geohash precision from density and radius, handle cell-boundary cases explicitly, and use a quadtree or S2 cells when density is highly uneven, k-nearest-neighbor queries dominate, or polygon/geofence semantics matter. Reads can be region-local; business updates propagate asynchronously into the spatial index with versioning.",
+  "ask": [
+    "Are indexed objects static businesses or rapidly moving entities?",
+    "Radius search, top K nearest, or polygon/geofence queries?",
+    "What filters and ranking signals are required?",
+    "How fresh must business location/status updates be?"
+  ],
+  "requirements": {
+    "functional": [
+      "Search nearby entities",
+      "Create/update businesses",
+      "Filter/rank",
+      "Fetch business details"
+    ],
+    "nonFunctional": [
+      "Low-latency reads",
+      "High availability",
+      "Spatial accuracy",
+      "Skew tolerance",
+      "Eventual index freshness"
+    ]
+  },
+  "scale": [
+    "Candidate count depends on density, not only radius; downtown and rural cells need different handling.",
+    "Use a cell precision that returns a manageable superset, then exact Haversine/S2 distance filters false positives.",
+    "Cache spatial ID lists by cell+filter and business details separately because their invalidation patterns differ."
+  ],
+  "flows": [
+    {
+      "name": "Nearby query",
+      "nodes": [
+        "Client coordinates",
+        "API",
+        "Cell cover / neighbors",
+        "Spatial index",
+        "Candidate IDs",
+        "Business cache/store",
+        "Exact distance + rank",
+        "Top K"
+      ]
+    },
+    {
+      "name": "Business update",
+      "nodes": [
+        "Business service",
+        "Primary DB",
+        "Change event",
+        "Spatial index updater",
+        "Cache invalidation"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Spatial index",
+      "default": "Geohash for straightforward radius search and operational simplicity.",
+      "why": "Hierarchical string prefixes are easy to partition, cache, and query.",
+      "switch": "Quadtree for adaptive density/kNN; S2 for high-quality spherical cells and geofencing/polygons."
+    },
+    {
+      "topic": "Precision",
+      "default": "Choose cell level dynamically from radius and local density; search neighboring cells.",
+      "why": "A fixed level either returns too many candidates or misses nearby points at boundaries.",
+      "switch": "Precompute several index levels for common radii."
+    },
+    {
+      "topic": "Data ownership",
+      "default": "Primary business DB is source of truth; spatial index is derived.",
+      "why": "Index rebuild and eventual propagation are then safe.",
+      "switch": "Use strongly coordinated update only when a wrong location creates a hard safety/compliance issue."
+    },
+    {
+      "topic": "Ranking",
+      "default": "Filter by hard constraints, then rank distance plus business quality/context.",
+      "why": "Pure nearest distance often produces a poor product result.",
+      "switch": "Keep deterministic distance-only mode for emergency or debugging fallback."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Boundary handling",
+      "points": [
+        "Never query only the current geohash cell.",
+        "Compute a covering set for the radius and include adjacent cells at edges/corners.",
+        "Apply exact distance before returning results because cells are only an approximation."
+      ]
+    },
+    {
+      "title": "Hot geography",
+      "points": [
+        "Split dense cells to finer precision or subpartition by business ID.",
+        "Replicate popular city cells and cache common filter combinations.",
+        "Do not let one downtown shard dictate the global partition scheme."
+      ]
+    },
+    {
+      "title": "Multi-region",
+      "points": [
+        "Route reads to the nearest region and replicate business/index changes.",
+        "Use region/country ownership for data locality.",
+        "Return slightly stale business metadata rather than cross-region hop unless the field is critical."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Nearby result missed at cell boundary",
+      "response": "Cover neighboring cells and run exact-distance filtering."
+    },
+    {
+      "risk": "Dense city cell becomes hot/huge",
+      "response": "Adaptive precision, subpartitioning, popular-cell replication, and candidate caps."
+    },
+    {
+      "risk": "Index lags primary business update",
+      "response": "Version each business record, invalidate old cells, reconcile derived index, and optionally read-through for critical updates."
+    },
+    {
+      "risk": "Bad/malicious coordinates",
+      "response": "Validate ranges, rate-limit, enforce privacy/precision policy, and reject impossible radius/filters."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Geohash versus quadtree?",
+      "a": "Geohash is operationally simple and works well for known-radius cell lookups. A quadtree adapts to density and is natural for kNN, but tree ownership/rebalancing is more complex. S2 is strong for spherical geometry and geofences."
+    },
+    {
+      "q": "How do you find the nearest 20 if the first cells contain only five?",
+      "a": "Expand the cell cover/rings incrementally until the current farthest candidate is closer than the minimum possible distance to all unsearched cells, then exact-rank and stop."
+    },
+    {
+      "q": "How do you paginate nearby results?",
+      "a": "Use a stable cursor containing rank/distance, entity ID, query-cell/version, and filter fingerprint. Offset pagination can duplicate/skip as rankings change."
+    },
+    {
+      "q": "Where do filters run?",
+      "a": "Highly selective/indexable filters should narrow candidates in the spatial index; dynamic or rich attributes can be applied after ID hydration, with a candidate budget."
+    }
+  ],
+  "mistakes": [
+    "Querying only one geohash cell",
+    "Using approximate cell distance as final truth",
+    "Ignoring urban density skew",
+    "Treating the derived spatial index as the only source of truth"
+  ],
+  "seniorSignal": "Choose the spatial representation from query semantics and operational needs, then discuss boundary correctness, density skew, index derivation, and stable pagination.",
+  "implementation": [
+    "PostGIS for moderate scale or geohash/S2 keys in a distributed KV store",
+    "Redis cache for cell candidate IDs and business details separately",
+    "CDC/Kafka to rebuild derived spatial indexes",
+    "Java geometry libraries for Haversine/S2 exact filtering"
+  ],
+  "related": [
+    5,
+    17,
+    18,
+    20
+  ],
+  "tags": [
+    "geohash",
+    "quadtree",
+    "S2",
+    "nearby",
+    "spatial index",
+    "kNN"
+  ],
+  "repoTitle": "Proximity Service",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/16.%20Proximity%20Service"
+}
