@@ -1,0 +1,181 @@
+{
+  "id": 11,
+  "title": "News Feed System",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 50,
+  "oneLine": "Use a hybrid fanout strategy: precompute feeds for normal users, pull celebrity posts at read time, and rank a bounded candidate set.",
+  "opening": "I would split publishing from feed retrieval. A post is stored once, then an event enters a fanout service. For normal authors, fanout-on-write inserts the post ID into followers’ feed inboxes so reads are fast. For celebrity or extremely high-fanout accounts, I avoid millions of writes and merge their recent posts at read time. The feed service retrieves candidate IDs from a cache, joins post and social metadata, applies privacy blocks and ranking, and returns cursor-based pages. The design is eventually consistent, with idempotent fanout jobs, bounded per-user feed storage, and separate caches for feed IDs, post content, social graph, counters, and actions.",
+  "ask": [
+    "Chronological or ranked feed?",
+    "What content types and privacy/block rules apply?",
+    "How many followers can one author have?",
+    "How fresh must new posts, deletes, and privacy changes appear?"
+  ],
+  "requirements": {
+    "functional": [
+      "Publish posts",
+      "Generate and read feed",
+      "Like/comment/follow",
+      "Privacy and delete propagation"
+    ],
+    "nonFunctional": [
+      "Low read latency",
+      "High availability",
+      "Eventual freshness",
+      "Celebrity fanout protection",
+      "Personalization"
+    ]
+  },
+  "scale": [
+    "Write amplification = posts/sec × average followers for push fanout; model celebrity tail separately.",
+    "Store only a bounded recent feed window per user; older pages can be generated or fetched from durable storage.",
+    "Candidate generation and ranking have different latency/cost profiles—cache and degrade them independently."
+  ],
+  "flows": [
+    {
+      "name": "Publish",
+      "nodes": [
+        "Author",
+        "Post service",
+        "Post store",
+        "Fanout event",
+        "Follower graph",
+        "Feed inbox cache/store"
+      ]
+    },
+    {
+      "name": "Read",
+      "nodes": [
+        "Reader",
+        "Feed service",
+        "Inbox candidates",
+        "Celebrity pull",
+        "Privacy filter",
+        "Ranker",
+        "Hydrate posts",
+        "Cursor page"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Fanout model",
+      "default": "Hybrid push for normal accounts and pull for celebrities.",
+      "why": "Push gives fast reads; pull prevents extreme write amplification.",
+      "switch": "Pure pull for small follower graphs or highly dynamic ranking; pure push for bounded enterprise groups."
+    },
+    {
+      "topic": "Ranking",
+      "default": "Generate a bounded candidate set, then rank with features and a timeout.",
+      "why": "Ranking every eligible post is too expensive and unpredictable.",
+      "switch": "Offer chronological fallback when the ranker is slow or unavailable."
+    },
+    {
+      "topic": "Feed storage",
+      "default": "Store ordered post IDs and lightweight scores, not full post copies.",
+      "why": "Content updates/deletes remain centralized and memory footprint stays bounded.",
+      "switch": "Denormalize immutable snippets at edge for latency, with deletion/version invalidation."
+    },
+    {
+      "topic": "Pagination",
+      "default": "Cursor based on score/time plus stable tie-breaker.",
+      "why": "Offset pagination shifts as new posts arrive and becomes expensive at depth.",
+      "switch": "Snapshot tokens when a fully stable browsing session is required."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Celebrity strategy",
+      "points": [
+        "Classify dynamically from follower count and fanout cost.",
+        "Pull only recent celebrity posts and merge with inbox candidates.",
+        "Cache merged candidates and prevent one celebrity from dominating ranking work."
+      ]
+    },
+    {
+      "title": "Privacy and deletion",
+      "points": [
+        "Filter again at read time even if fanout checked permissions.",
+        "Emit delete/privacy-change events to invalidate cached IDs/content.",
+        "Use tombstones so old fanout jobs cannot resurrect removed content."
+      ]
+    },
+    {
+      "title": "Ranking degradation",
+      "points": [
+        "Timeout feature calls and use cached/default features.",
+        "Keep chronological or lightweight ranking fallback.",
+        "Measure freshness, relevance, diversity, and latency separately."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Fanout job duplicates",
+      "response": "Idempotent insert by user+post ID and replayable event log."
+    },
+    {
+      "risk": "Celebrity post causes write storm",
+      "response": "Hybrid pull path, rate-controlled fanout, and automatic celebrity threshold."
+    },
+    {
+      "risk": "Deleted/private post remains visible",
+      "response": "Read-time authorization, tombstones, cache purge, and event reconciliation."
+    },
+    {
+      "risk": "Ranker/feature store is down",
+      "response": "Bounded timeout and chronological/cached fallback without blocking feed availability."
+    }
+  ],
+  "questions": [
+    {
+      "q": "How do you choose the celebrity threshold?",
+      "a": "From measured fanout cost, queue lag, follower activity, and read frequency—not a fixed follower count alone. Reclassify with hysteresis to avoid thrashing."
+    },
+    {
+      "q": "How do you avoid duplicate posts when merging push and pull?",
+      "a": "Deduplicate by post ID before ranking and use a stable cursor containing score/time and ID."
+    },
+    {
+      "q": "How is feed freshness measured?",
+      "a": "Time from post acceptance to eligibility/visibility for active followers, plus delete/privacy propagation latency. Track by author class and region."
+    },
+    {
+      "q": "What if a user follows 100K accounts?",
+      "a": "Treat it as a whale: cap candidate sources, partition graph reads, use pull-heavy generation, and apply product limits or asynchronous personalized materialization."
+    }
+  ],
+  "mistakes": [
+    "Choosing push or pull universally",
+    "Storing full post copies in every feed",
+    "Ignoring delete/privacy rechecks",
+    "Using offset pagination on a constantly changing ranked list"
+  ],
+  "seniorSignal": "Show that feed generation, candidate retrieval, policy filtering, ranking, hydration, and pagination are separate concerns with independent degradation paths.",
+  "implementation": [
+    "Kafka post/fanout events; worker pools partitioned by author or follower range",
+    "Redis sorted sets/lists for bounded feed inboxes",
+    "Graph store/cache for follows and blocks",
+    "Ranking service with strict deadline and chronological fallback"
+  ],
+  "related": [
+    10,
+    12,
+    13,
+    19,
+    20,
+    21
+  ],
+  "tags": [
+    "fanout",
+    "ranking",
+    "celebrity",
+    "feed",
+    "cursor",
+    "privacy"
+  ],
+  "repoTitle": "News Feed System",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/11.%20News%20Feed%20System"
+}
