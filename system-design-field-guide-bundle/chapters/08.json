@@ -1,0 +1,179 @@
+{
+  "id": 8,
+  "title": "URL Shortener",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Core",
+  "time": 40,
+  "oneLine": "Create a compact alias, store the mapping durably, make redirects cache-heavy and fast, and push analytics and abuse checks off the critical path.",
+  "opening": "I would separate the create path from the redirect path because reads dominate and have stricter latency. Creation validates and normalizes the URL, checks quotas and malicious content, chooses either a user alias or a generated 64-bit ID encoded in Base62, and stores an immutable mapping with owner, expiry, and status. Redirect first checks an edge/cache layer, then the partitioned mapping store, and emits analytics asynchronously. I would use 302 when accurate click analytics and destination changes matter, or 301 when permanent client/CDN caching is preferred. The mapping is sharded by short code, hot entries are cached, aliases are reserved atomically, and expiry/deletion uses tombstones so old links are not immediately reused.",
+  "ask": [
+    "Can users choose custom aliases?",
+    "Are links editable, expiring, private, or one-time?",
+    "Do we need exact analytics and should bots be counted?",
+    "What is the read/write ratio, retention, and acceptable redirect latency?"
+  ],
+  "requirements": {
+    "functional": [
+      "Create short link",
+      "Redirect",
+      "Custom alias and expiry",
+      "Basic analytics and abuse controls"
+    ],
+    "nonFunctional": [
+      "Very low redirect latency",
+      "High read availability",
+      "Collision-free aliases",
+      "Durable mappings",
+      "Abuse resistance"
+    ]
+  },
+  "scale": [
+    "For 100M new links/day, average writes are about 1.2K/s; redirects may be 10–100× higher.",
+    "A 7-character Base62 space is about 3.5 trillion combinations; choose length from lifetime and safety margin.",
+    "Cache the hot working set and negative lookups briefly, but do not let negative caching block a just-created alias."
+  ],
+  "flows": [
+    {
+      "name": "Create",
+      "nodes": [
+        "Client",
+        "API + auth/rate limit",
+        "URL safety check",
+        "ID / alias reservation",
+        "Mapping store",
+        "Return short URL"
+      ]
+    },
+    {
+      "name": "Redirect",
+      "nodes": [
+        "Browser",
+        "CDN / edge",
+        "Mapping cache",
+        "Mapping store",
+        "301/302 response",
+        "Async click event"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Alias generation",
+      "default": "Generate a unique numeric ID then Base62-encode it.",
+      "why": "It is collision-free and easy to partition; the ID service can allocate locally at scale.",
+      "switch": "Use secure random aliases when enumeration or volume leakage is unacceptable; handle rare collisions with conditional insert."
+    },
+    {
+      "topic": "301 or 302",
+      "default": "302 for editable links and server-side analytics; 301 for truly permanent high-cache redirects.",
+      "why": "Browsers/CDNs may bypass the service after caching a 301.",
+      "switch": "Use 307/308 when preserving HTTP method is relevant, though most short links are GET redirects."
+    },
+    {
+      "topic": "Storage",
+      "default": "A partitioned key-value/relational mapping keyed by short code, with durable replicas.",
+      "why": "The dominant access pattern is a point lookup by alias.",
+      "switch": "Use relational constraints when ownership, billing, alias reservation, and administrative queries dominate at moderate scale."
+    },
+    {
+      "topic": "Analytics",
+      "default": "Emit an event asynchronously and aggregate later.",
+      "why": "A click-tracking outage must not prevent redirection.",
+      "switch": "Synchronous checks only for security policies that must block the redirect."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Alias lifecycle",
+      "points": [
+        "Reserve custom aliases with a unique conditional write.",
+        "Keep tombstones after expiry/deletion to prevent unsafe immediate reuse and stale-cache misrouting.",
+        "Version cache entries when destinations can be edited."
+      ]
+    },
+    {
+      "title": "Abuse and safety",
+      "points": [
+        "Rate-limit creation and suspicious redirect traffic.",
+        "Scan destinations, use allow/deny reputation feeds, and support emergency takedown.",
+        "Prevent open-redirect header injection and normalize schemes/Unicode hostnames."
+      ]
+    },
+    {
+      "title": "Hot links",
+      "points": [
+        "CDN/edge cache the mapping and redirect response where policy permits.",
+        "Replicate a single hot mapping rather than repartitioning the full store.",
+        "Sample analytics or aggregate at the edge to avoid an event storm."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Alias collision or race",
+      "response": "Conditional insert/unique constraint; retry with a new ID or return conflict for custom alias."
+    },
+    {
+      "risk": "Cache serves an old edited destination",
+      "response": "Versioned invalidation, short TTL for editable links, and cache purge on change."
+    },
+    {
+      "risk": "Analytics pipeline is down",
+      "response": "Buffered durable event log, sampling/backpressure, and never block redirect."
+    },
+    {
+      "risk": "Malicious/phishing link",
+      "response": "Asynchronous and synchronous safety tiers, takedown status in mapping, reputation checks, audit, and creation quotas."
+    }
+  ],
+  "questions": [
+    {
+      "q": "How do you prevent users from guessing other links?",
+      "a": "Use random or encrypted public aliases rather than sequential Base62 IDs, or accept enumeration for public links and protect private links with authorization/unguessable tokens."
+    },
+    {
+      "q": "How do you support expiry?",
+      "a": "Store expiry with the mapping, enforce it on redirect, and clean up asynchronously. A tombstone prevents stale caches or immediate alias reuse from resolving to the wrong destination."
+    },
+    {
+      "q": "Where do you shard?",
+      "a": "By a stable hash of the short code. The redirect key is known, so point routing is straightforward. Keep ownership/admin indexes separately if needed."
+    },
+    {
+      "q": "How do you count unique visitors?",
+      "a": "Emit raw events then approximate uniques with HyperLogLog or privacy-aware aggregation. Exact user identity requires authentication and changes the privacy model."
+    }
+  ],
+  "mistakes": [
+    "Using a hash substring without a collision plan",
+    "Putting analytics synchronously on redirect",
+    "Ignoring custom-alias race conditions",
+    "Reusing expired aliases immediately"
+  ],
+  "seniorSignal": "Treat redirect availability as more important than analytics. Explain lifecycle, abuse controls, cache invalidation, public-ID leakage, and how hot links are isolated.",
+  "implementation": [
+    "Spring Boot API; PostgreSQL unique alias reservation or DynamoDB conditional writes",
+    "Snowflake/UUIDv7 + Base62 or cryptographically random token",
+    "Redis/CDN for hot mappings",
+    "Kafka click stream with separate aggregation and bot filtering"
+  ],
+  "related": [
+    4,
+    7,
+    9,
+    10,
+    20,
+    21
+  ],
+  "tags": [
+    "Base62",
+    "redirect",
+    "cache",
+    "analytics",
+    "abuse",
+    "expiry"
+  ],
+  "repoTitle": "URL Shortener",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/08.%20URL%20Shortener"
+}
