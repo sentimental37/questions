@@ -1,0 +1,179 @@
+{
+  "id": 10,
+  "title": "Notification System",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Core",
+  "time": 45,
+  "oneLine": "Accept notification intent once, resolve preferences and templates, enqueue by channel, deliver through provider adapters, and track retries, dedupe, and status independently.",
+  "opening": "I would model a notification as durable intent rather than a direct provider call. A producer sends an idempotent request containing event, recipient, template, variables, priority, and schedule. The notification service validates it, resolves user preferences and quiet hours, renders a versioned template, persists the notification, and publishes channel-specific jobs. Independent email, SMS, push, and in-app workers apply rate limits and provider routing, then record delivery attempts and status events. Retries use exponential backoff and a DLQ; provider callbacks update delivered/bounced/opened states asynchronously. Critical transactional notifications and bulk marketing traffic use separate queues and capacity so a campaign cannot delay OTPs or trade alerts.",
+  "ask": [
+    "Which channels and delivery guarantees are required?",
+    "Transactional, marketing, or both—and what priorities/SLOs?",
+    "Do users have preferences, quiet hours, locale, or fallback channels?",
+    "Is the requirement accepted, sent, delivered, or exactly one visible notification?"
+  ],
+  "requirements": {
+    "functional": [
+      "Send/schedule notifications",
+      "Multi-channel templates",
+      "Preferences and opt-out",
+      "Status tracking and callbacks"
+    ],
+    "nonFunctional": [
+      "High throughput",
+      "Priority isolation",
+      "At-least-once durability",
+      "Provider failover",
+      "Compliance and audit"
+    ]
+  },
+  "scale": [
+    "Estimate notifications by channel because provider throughput and payload sizes differ.",
+    "Separate burst ingestion capacity from provider send rate; queues absorb the mismatch.",
+    "Store attempt history with retention tiers—hot operational status versus long-term audit/analytics."
+  ],
+  "flows": [
+    {
+      "name": "Intent",
+      "nodes": [
+        "Producer",
+        "Notification API",
+        "Idempotency + policy",
+        "Preference/template",
+        "Notification store",
+        "Channel queues"
+      ]
+    },
+    {
+      "name": "Delivery",
+      "nodes": [
+        "Priority worker",
+        "Rate limiter",
+        "Provider adapter",
+        "Email/SMS/Push",
+        "Callback webhook",
+        "Status + analytics"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Delivery semantics",
+      "default": "At-least-once processing with idempotency/deduplication.",
+      "why": "Provider calls and callbacks cannot generally participate in one transaction.",
+      "switch": "Use stronger transactional boundaries only inside your system, then keep external effects idempotent."
+    },
+    {
+      "topic": "Queue layout",
+      "default": "Separate channels and priority classes; isolate transactional from bulk.",
+      "why": "Different providers, retry behavior, and SLOs otherwise create head-of-line blocking.",
+      "switch": "Tenant-dedicated queues for regulated or very large customers."
+    },
+    {
+      "topic": "Template rendering",
+      "default": "Versioned templates rendered before provider send, with locale and schema validation.",
+      "why": "Retries should reproduce the intended message and not silently use a newer template.",
+      "switch": "Provider-side templates may reduce payload/cost but create version drift and lock-in."
+    },
+    {
+      "topic": "Provider routing",
+      "default": "Health/cost/region-aware adapter with circuit breakers and fallback.",
+      "why": "No single external provider should be a platform SPOF.",
+      "switch": "Do not fail over blindly if sender identity, regulatory consent, or message semantics differ."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Idempotency and dedupe",
+      "points": [
+        "Producer supplies an idempotency key scoped to event and recipient.",
+        "Persist accepted intent and publish with a transactional outbox.",
+        "Workers record provider request ID and suppress repeat side effects where possible."
+      ]
+    },
+    {
+      "title": "Status model",
+      "points": [
+        "Distinguish accepted, queued, attempted, provider-accepted, delivered, failed, bounced, and opened.",
+        "Callbacks may arrive late, duplicated, or out of order; apply monotonic/state-machine rules.",
+        "Expose honest semantics—provider accepted is not user delivered."
+      ]
+    },
+    {
+      "title": "Compliance",
+      "points": [
+        "Honor consent, unsubscribe, quiet hours, data locality, and retention.",
+        "Redact sensitive template variables from logs.",
+        "Audit policy and template version used for every send."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Duplicate messages",
+      "response": "End-to-end idempotency key, outbox, worker dedupe, and provider request IDs; accept that some channels still need reconciliation."
+    },
+    {
+      "risk": "Provider outage",
+      "response": "Circuit breaker, bounded retries, alternative provider, queue age alert, and explicit degraded-channel policy."
+    },
+    {
+      "risk": "Marketing burst delays OTP",
+      "response": "Separate priority queues, worker pools, quotas, and reserved provider capacity."
+    },
+    {
+      "risk": "Poison template/payload",
+      "response": "Schema validation, retry classification, DLQ with safe replay tooling, and template canarying."
+    }
+  ],
+  "questions": [
+    {
+      "q": "How do you guarantee an OTP is sent only once?",
+      "a": "Guarantee one accepted notification intent and use idempotency through the provider call, but external uncertainty means you may still retry. Make OTP consumption single-use so duplicate delivery cannot duplicate the protected action."
+    },
+    {
+      "q": "How do scheduled notifications work?",
+      "a": "Store schedule time durably, move near-due items into queues via time buckets or a delayed queue, and make the handoff idempotent. Re-evaluate preferences at send time if policy requires it."
+    },
+    {
+      "q": "What if a callback arrives before the send response?",
+      "a": "Persist events with provider IDs and apply a state machine that accepts out-of-order evidence. Do not assume transport order between API response and webhook."
+    },
+    {
+      "q": "How do you measure reliability?",
+      "a": "Track accepted-to-provider and accepted-to-delivered latency by channel/priority, queue age, retry rate, bounce/error taxonomy, provider availability, and user-visible success—not only worker throughput."
+    }
+  ],
+  "mistakes": [
+    "Calling providers directly from product services",
+    "Equating provider acceptance with delivery",
+    "One queue for every priority/channel",
+    "Retrying permanent errors forever"
+  ],
+  "seniorSignal": "Separate intent, policy, delivery, and evidence. Discuss priority isolation, provider uncertainty, compliance, transactional outbox, and truthful status semantics.",
+  "implementation": [
+    "Spring Boot notification API + PostgreSQL/outbox",
+    "Kafka topics partitioned by channel/priority",
+    "Provider adapters behind Resilience4j circuit breakers",
+    "Redis token buckets; webhook handlers with monotonic status transitions"
+  ],
+  "related": [
+    4,
+    8,
+    11,
+    12,
+    19,
+    20
+  ],
+  "tags": [
+    "email",
+    "SMS",
+    "push",
+    "queue",
+    "outbox",
+    "provider failover"
+  ],
+  "repoTitle": "Notification System",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/10.%20Notification%20System"
+}
