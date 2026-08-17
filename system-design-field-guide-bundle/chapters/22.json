@@ -1,0 +1,180 @@
+{
+  "id": 22,
+  "title": "Hotel Reservation System",
+  "category": "Transactional & Financial",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 55,
+  "oneLine": "Model inventory by hotel, room type, and date; reserve it with an atomic conditional write; make booking/payment a durable idempotent state machine.",
+  "opening": "The hard part is not search—it is preventing oversell across a multi-night stay while payment and retries are uncertain. I would keep hotel/rate/search data in read-optimized caches and indexes, but make a relational inventory table the source of truth with one row per hotel, room type, and date. A booking request carries an idempotency key, validates the rate quote, and atomically increments reserved count for every date only if capacity plus allowed overbooking is not exceeded. The reservation enters PENDING with an expiry, payment is authorized, and a saga confirms or releases inventory. I prefer optimistic or conditional updates because average contention is low, but I would isolate very hot properties and use short holds. Inventory and reservation records should live in the same transactional boundary when practical; search availability remains eventually consistent and is rechecked at booking.",
+  "ask": [
+    "Room-level assignment or room-type inventory?",
+    "Overbooking allowed, and by how much?",
+    "Payment authorization at booking or later?",
+    "Cancellation, modification, holds, and multi-room reservations?"
+  ],
+  "requirements": {
+    "functional": [
+      "Search hotels/rates",
+      "Check availability",
+      "Reserve/cancel/modify",
+      "Payment",
+      "Admin inventory/rates"
+    ],
+    "nonFunctional": [
+      "No oversell beyond policy",
+      "Idempotency",
+      "High read availability",
+      "Transactional correctness",
+      "Auditability"
+    ]
+  },
+  "scale": [
+    "Search QPS is much higher than booking QPS; isolate the read index from transactional inventory.",
+    "Inventory writes touch one row per stay date, so long stays increase transaction size.",
+    "Contention is bursty around popular properties/events despite low global TPS."
+  ],
+  "flows": [
+    {
+      "name": "Search",
+      "nodes": [
+        "Guest",
+        "Search API",
+        "Hotel/rate index",
+        "Cached approximate availability",
+        "Ranked options"
+      ]
+    },
+    {
+      "name": "Book",
+      "nodes": [
+        "Booking API",
+        "Idempotency",
+        "Reprice/revalidate",
+        "Conditional inventory transaction",
+        "PENDING reservation",
+        "Payment auth",
+        "Confirm or release"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Inventory model",
+      "default": "Rows keyed by hotel + room type + date, with total/reserved/hold counters.",
+      "why": "Availability for a stay is a range of daily constraints and updates remain local to one property.",
+      "switch": "Assign physical room only near check-in; doing it at booking reduces flexibility."
+    },
+    {
+      "topic": "Concurrency control",
+      "default": "Atomic conditional update or optimistic version check across all stay dates.",
+      "why": "It avoids long locks while preserving the capacity invariant.",
+      "switch": "Pessimistic locking may be simpler for a very small system or extreme contention with short transactions."
+    },
+    {
+      "topic": "Reservation/payment orchestration",
+      "default": "Durable state machine/saga: hold inventory, authorize payment, confirm; compensate on failure.",
+      "why": "External PSP cannot join the database transaction.",
+      "switch": "Keep inventory and reservation in one DB transaction, but still orchestrate payment asynchronously/idempotently."
+    },
+    {
+      "topic": "Search consistency",
+      "default": "Search is approximate/eventually consistent; booking rechecks authoritative inventory.",
+      "why": "Strongly consistent global search would be expensive and still race before checkout.",
+      "switch": "Display ‘limited availability’ and short-lived quote/hold for scarce inventory."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Atomic multi-date reservation",
+      "points": [
+        "Begin transaction, lock or conditionally update every date in deterministic order, then insert reservation.",
+        "Rollback all dates if any night lacks capacity.",
+        "Use version/capacity predicate to prevent lost updates and deadlocks."
+      ]
+    },
+    {
+      "title": "Holds and expiry",
+      "points": [
+        "A hold has owner, quantity, expiry, and state; it counts against available inventory.",
+        "Expiry worker releases idempotently, but booking path also treats expired holds as invalid.",
+        "Avoid long holds that let bots exhaust inventory."
+      ]
+    },
+    {
+      "title": "Pricing correctness",
+      "points": [
+        "Quote carries rate-plan/version, dates, taxes, currency, and expiry.",
+        "Booking revalidates or obtains explicit customer acceptance of price change.",
+        "Store the accepted price breakdown immutably for audit/refunds."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Client retries and creates two bookings",
+      "response": "Idempotency key scoped to customer/request, durable response replay, and unique constraint."
+    },
+    {
+      "risk": "Payment succeeds but confirmation response is lost",
+      "response": "PSP webhook/reconciliation resumes the same state machine; never create a new reservation from the retry."
+    },
+    {
+      "risk": "Hold expires while payment is in flight",
+      "response": "Use state/version checks, grace policy, and compensate/refund if confirmation cannot safely complete."
+    },
+    {
+      "risk": "Search shows availability that just sold out",
+      "response": "Recheck at booking, return a clear conflict/alternative, and shorten cache/propagation for scarce inventory."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why is optimistic locking appropriate?",
+      "a": "Most hotel/date rows have low contention, so retries are rare and locks are avoided. For a hot property, use atomic predicates, queue/partition by hotel, or temporarily switch strategy."
+    },
+    {
+      "q": "How do you prevent deadlocks for a seven-night stay?",
+      "a": "Acquire/update rows in a deterministic date order, keep the transaction short, and retry transient conflicts with jitter."
+    },
+    {
+      "q": "Would you use two-phase commit with the payment provider?",
+      "a": "No. External PSPs do not expose a compatible participant and holding distributed locks is unsafe. Use local transactions plus a durable saga, idempotent PSP calls, webhooks, and reconciliation."
+    },
+    {
+      "q": "How does cancellation restore inventory?",
+      "a": "State-machine transition with idempotency; atomically decrement reserved counts for relevant dates and append refund/cancellation workflow. Preserve the original reservation and price audit trail."
+    }
+  ],
+  "mistakes": [
+    "Using search cache as authoritative inventory",
+    "Checking availability then updating in separate non-atomic calls",
+    "Ignoring multi-night atomicity",
+    "Treating payment timeout as definite failure"
+  ],
+  "seniorSignal": "Name the capacity invariant and show exactly where it is enforced. Then handle uncertain external payment through state, idempotency, compensation, and reconciliation.",
+  "implementation": [
+    "PostgreSQL inventory rows with conditional UPDATE/version and deterministic date ordering",
+    "Spring transaction for inventory+reservation; outbox for saga events",
+    "Redis/search index for approximate availability and hotel search",
+    "PSP idempotency keys, webhook inbox, and expiry workers"
+  ],
+  "related": [
+    4,
+    6,
+    10,
+    19,
+    26,
+    27
+  ],
+  "tags": [
+    "inventory",
+    "optimistic locking",
+    "saga",
+    "idempotency",
+    "booking",
+    "payment"
+  ],
+  "repoTitle": "Hotel Reservation System",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/22.%20Hotel%20Reservation%20System"
+}
