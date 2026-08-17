@@ -1,0 +1,201 @@
+{
+  "id": 24,
+  "title": "S3-like Object Storage",
+  "category": "Storage & Messaging",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 60,
+  "oneLine": "Keep namespace metadata strongly controlled, stream object bytes directly to placement-selected data nodes, verify checksums, and use replication or erasure coding with background repair.",
+  "opening": "I would split the control plane from the byte path. The API layer authenticates and authorizes bucket/object operations, while a strongly consistent metadata service owns namespace, versions, multipart sessions, object manifests, and placement references. Uploads stream chunks directly to data nodes or a blob layer selected by a placement service that understands capacity and failure domains. Each chunk is checksummed, replicated synchronously for small/hot objects or encoded with erasure coding for large/cold data, then the metadata commit atomically publishes the object version. Reads resolve metadata, choose healthy replicas/fragments, verify integrity, and support range requests. Heartbeats and scrubbers detect loss/corruption, repair runs in the background, deletes create tombstones and later garbage collection, and LIST is served from partitioned ordered metadata rather than scanning data nodes.",
+  "ask": [
+    "Object sizes, total objects, throughput, and durability target?",
+    "PUT/GET/DELETE/LIST, versioning, range reads, multipart, lifecycle?",
+    "Strong read-after-write and overwrite/list consistency?",
+    "Single region or cross-region replication and compliance?"
+  ],
+  "requirements": {
+    "functional": [
+      "Buckets/objects",
+      "Multipart and range I/O",
+      "Versioning/list",
+      "Lifecycle/delete"
+    ],
+    "nonFunctional": [
+      "Extreme durability",
+      "Horizontal scale",
+      "Integrity",
+      "High availability",
+      "Cost-tiering"
+    ]
+  },
+  "scale": [
+    "Metadata cardinality is object count; byte storage is object size—small-object systems can be metadata-bound.",
+    "Durability comes from independent failure domains plus continuous detection/repair, not replication factor alone.",
+    "Erasure coding lowers storage overhead but increases CPU/network and small-read complexity."
+  ],
+  "flows": [
+    {
+      "name": "PUT",
+      "nodes": [
+        "Client",
+        "API/IAM",
+        "Multipart session",
+        "Placement",
+        "Data nodes/fragments + checksums",
+        "Quorum durability",
+        "Atomic metadata publish"
+      ]
+    },
+    {
+      "name": "GET",
+      "nodes": [
+        "Client",
+        "Metadata lookup",
+        "Replica/fragment selection",
+        "Range read",
+        "Checksum",
+        "Stream response"
+      ]
+    },
+    {
+      "name": "Repair/lifecycle",
+      "nodes": [
+        "Heartbeats/scrub",
+        "Lost/corrupt detector",
+        "Repair scheduler",
+        "Reconstruct",
+        "Tier/expire",
+        "Garbage collection"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Metadata consistency",
+      "default": "Consensus-backed strongly consistent partitioned metadata.",
+      "why": "Namespace uniqueness, version publication, multipart completion, and LIST semantics need one authoritative outcome.",
+      "switch": "Derived inventory/catalog can be eventually consistent, but not object identity itself."
+    },
+    {
+      "topic": "Replication or erasure coding",
+      "default": "Replication for small/hot/latency-sensitive objects; erasure coding for large/cold objects.",
+      "why": "Replication gives simple fast reads; erasure coding saves capacity at repair/CPU/network cost.",
+      "switch": "Policy can transition objects asynchronously through lifecycle tiers."
+    },
+    {
+      "topic": "Placement",
+      "default": "Capacity- and topology-aware deterministic placement with a versioned map.",
+      "why": "Replicas/fragments must span disks, hosts, racks/AZs and avoid hotspots.",
+      "switch": "Consistent hashing is a useful primitive but needs weighting and failure-domain rules."
+    },
+    {
+      "topic": "Publication",
+      "default": "Data first, then atomic metadata commit makes the version visible.",
+      "why": "Readers never observe a manifest pointing to incomplete bytes.",
+      "switch": "Uncommitted uploads are hidden and garbage-collected after a grace period."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Multipart upload",
+      "points": [
+        "Create session, upload numbered parts independently with checksums, list/retry parts, then complete with an ordered manifest.",
+        "Completion is idempotent and atomically creates a version.",
+        "Abort/expired sessions leave reclaimable unreferenced parts."
+      ]
+    },
+    {
+      "title": "Integrity and repair",
+      "points": [
+        "Checksum at client/transport/chunk and scrub periodically at rest.",
+        "Read from another replica on mismatch and enqueue repair.",
+        "Track repair backlog and durability risk by failure domain."
+      ]
+    },
+    {
+      "title": "Small objects",
+      "points": [
+        "Millions of tiny files cause metadata and random-I/O overhead.",
+        "Pack small objects into larger segments with an index or dedicate a small-object tier.",
+        "Garbage collection then compacts segments rather than deleting one file at a time."
+      ]
+    },
+    {
+      "title": "LIST and deletion",
+      "points": [
+        "Partition ordered metadata by bucket/prefix and paginate with opaque continuation tokens.",
+        "Delete writes a versioned tombstone; legal hold/version retention may keep data.",
+        "Physical reclamation is asynchronous and safe only after no metadata/version references remain."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Data node fails during PUT",
+      "response": "Write to alternate placement, require durability quorum before publish, and repair under-replicated chunks."
+    },
+    {
+      "risk": "Metadata committed but data corrupts later",
+      "response": "Checksums, replicated/erasure fragments, background scrub, read repair, and durability-risk alerts."
+    },
+    {
+      "risk": "Placement map is stale",
+      "response": "Version/epoch on routes, data-node redirect or rejection, refresh control-plane map, and idempotent retry."
+    },
+    {
+      "risk": "Delete races with multipart/reader",
+      "response": "Versioned metadata state, leases/preconditions, tombstone semantics, and delayed physical GC."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Why not store objects in a distributed filesystem?",
+      "a": "Object storage exposes immutable key-based blobs, decouples metadata from placement, scales namespace independently, and avoids POSIX locking/rename semantics. A distributed filesystem may implement the lower layer but has a different API contract."
+    },
+    {
+      "q": "How do you achieve eleven nines durability?",
+      "a": "Independent failure-domain placement, checksums, continuous scrubbing, rapid repair, conservative deletion, tested restore, and operational risk controls. It is an end-to-end probability target, not simply ‘three copies.’"
+    },
+    {
+      "q": "How do range reads work with erasure coding?",
+      "a": "Map byte range to stripes/fragments, fetch enough fragments—prefer data fragments without reconstruction—and verify. Small ranges may suffer amplification, which is why hot/small objects often use replication."
+    },
+    {
+      "q": "How do you support read-after-write?",
+      "a": "The metadata commit is strongly consistent and only references durable data. Subsequent reads resolve the committed version; caches use versioned keys/ETags to avoid stale overwrite results."
+    }
+  ],
+  "mistakes": [
+    "Treating data nodes as the namespace source of truth",
+    "Publishing metadata before bytes are durable",
+    "Saying three replicas automatically imply extreme durability",
+    "Ignoring small-object and garbage-collection economics"
+  ],
+  "seniorSignal": "Explain the publication invariant, placement topology, integrity evidence, repair loop, metadata/list scaling, and lifecycle economics. Durability is a continuous process.",
+  "implementation": [
+    "Consensus-backed metadata shards (Raft) and versioned placement service",
+    "Chunk servers/object nodes with checksums, replication and erasure coding",
+    "Multipart signed upload, ETags, preconditions, range GET",
+    "Scrubber/repair/lifecycle workers with object-store-style inventory and audit"
+  ],
+  "related": [
+    5,
+    6,
+    7,
+    14,
+    15,
+    19,
+    20,
+    23
+  ],
+  "tags": [
+    "object storage",
+    "erasure coding",
+    "multipart",
+    "checksum",
+    "metadata",
+    "repair"
+  ],
+  "repoTitle": "S3-like Object Storage",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/24.%20S3-like%20Object%20Storage"
+}
