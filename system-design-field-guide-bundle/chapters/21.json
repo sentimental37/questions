@@ -1,0 +1,180 @@
+{
+  "id": 21,
+  "title": "Ad Click Event Aggregation",
+  "category": "Storage & Messaging",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 55,
+  "oneLine": "Keep an immutable raw click log, aggregate by event time with watermarks and dedupe, publish queryable windows, and reconcile stream results against a batch source of truth.",
+  "opening": "Because clicks drive billing, I would preserve every accepted raw event in an immutable partitioned log and treat aggregates as derived views. Edge collectors validate schema, attach event/ingest timestamps and a click ID, then publish by ad or campaign key. A stream processor deduplicates, applies fraud signals, and aggregates tumbling or sliding windows using event time. Watermarks decide when a window is complete while allowing bounded late events; later corrections update a versioned aggregate. Results go to an OLAP/query store, while raw events remain in object storage for replay and audit. A periodic batch reconciliation recomputes authoritative totals and emits adjustments rather than silently rewriting billed history. Hot campaigns are salted or two-stage aggregated.",
+  "ask": [
+    "Is this for dashboards, billing, fraud, attribution, or all?",
+    "Which dimensions and top-N/filter queries?",
+    "How late can events arrive and how exact must counts be?",
+    "What is the duplicate/fraud model and retention requirement?"
+  ],
+  "requirements": {
+    "functional": [
+      "Ingest clicks",
+      "Aggregate by time/dimensions",
+      "Top N/filter queries",
+      "Dedupe/reconcile"
+    ],
+    "nonFunctional": [
+      "High throughput",
+      "Correct event-time windows",
+      "Replayability",
+      "Auditability",
+      "Low-latency aggregates"
+    ]
+  },
+  "scale": [
+    "1B clicks/day is roughly 11.6K/s average; campaign peaks and bot attacks can be orders of magnitude higher.",
+    "Dimension combinations define aggregate cardinality; precompute only common cubes and use OLAP for flexible drill-down.",
+    "Raw log retention enables replay after code/fraud-rule changes and is mandatory when money depends on the result."
+  ],
+  "flows": [
+    {
+      "name": "Streaming",
+      "nodes": [
+        "Ad edge",
+        "Schema/id validation",
+        "Partitioned log",
+        "Dedupe + fraud",
+        "Event-time windows",
+        "Aggregate store",
+        "Dashboard/billing"
+      ]
+    },
+    {
+      "name": "Reconciliation",
+      "nodes": [
+        "Raw immutable archive",
+        "Batch recompute",
+        "Compare stream totals",
+        "Adjustment events",
+        "Audit report"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Time semantics",
+      "default": "Event time with watermarks and an explicit allowed-lateness policy.",
+      "why": "Processing-time windows misattribute delayed mobile/offline events.",
+      "switch": "Processing time is adequate for purely operational live dashboards where exact attribution is irrelevant."
+    },
+    {
+      "topic": "Architecture",
+      "default": "Streaming for freshness plus immutable raw replay and periodic reconciliation.",
+      "why": "This combines low latency with an auditable correction path.",
+      "switch": "Kappa-style replay from one log can simplify code if one stream engine handles historical backfill safely."
+    },
+    {
+      "topic": "Deduplication",
+      "default": "Stable click/event ID with state TTL and idempotent aggregate updates.",
+      "why": "Network/client retries are normal and billing cannot double count them.",
+      "switch": "Approximate structures may be acceptable for non-billing analytics at massive scale."
+    },
+    {
+      "topic": "Hot keys",
+      "default": "Two-stage aggregation with deterministic salt for hot campaigns, then merge.",
+      "why": "One popular ad should not serialize the whole stream on one partition.",
+      "switch": "Preserve strict per-key order only where the computation genuinely requires it."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Watermarks and late data",
+      "points": [
+        "Watermark estimates that events before time T are mostly complete.",
+        "Keep window state for allowed lateness and emit updates/retractions with version.",
+        "Very late events flow into reconciliation/adjustment rather than unbounded online state."
+      ]
+    },
+    {
+      "title": "Exactly-once accounting",
+      "points": [
+        "Checkpoint source offsets and operator state atomically in the stream engine.",
+        "Write aggregates idempotently with window/key/version or transactional sink.",
+        "Billing still uses finalized/reconciled ledger entries, not a vague ‘exactly once’ claim."
+      ]
+    },
+    {
+      "title": "Fraud and audit",
+      "points": [
+        "Keep raw event, validation decision, rule/model version, and provenance.",
+        "Separate observed clicks from billable clicks.",
+        "Corrections are append-only adjustments with a reason and lineage."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Stream job crashes",
+      "response": "Restore checkpoint, replay log from offsets, and use idempotent/versioned sink."
+    },
+    {
+      "risk": "Late events change a billed period",
+      "response": "Finalize after policy cutoff; post an adjustment event and preserve both original and corrected totals."
+    },
+    {
+      "risk": "Popular campaign creates hot partition",
+      "response": "Salt/two-stage aggregate, pre-aggregate at edge, and rebalance based on measured key skew."
+    },
+    {
+      "risk": "Schema/rule bug corrupts aggregates",
+      "response": "Immutable raw archive, versioned jobs, shadow recomputation, and controlled replay/backfill."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Event time versus processing time?",
+      "a": "Event time answers when the click occurred and needs watermarks for out-of-order arrivals. Processing time answers when the system saw it and is simpler but can put delayed events in the wrong business window."
+    },
+    {
+      "q": "What is a watermark?",
+      "a": "A progress estimate used to close event-time windows. It is not a guarantee that no earlier event will arrive; allowed lateness and correction policy handle exceptions."
+    },
+    {
+      "q": "How do you get exactly one billed click?",
+      "a": "Stable event ID, dedupe, checkpointed processing, idempotent/versioned aggregate writes, and final append-only billing ledger/reconciliation. Define the boundary instead of relying on broker marketing terminology."
+    },
+    {
+      "q": "Why keep raw data if aggregates exist?",
+      "a": "For audit, fraud reclassification, bug recovery, new dimensions, and deterministic replay. Aggregates are a replaceable view; raw accepted facts are the evidence."
+    }
+  ],
+  "mistakes": [
+    "Using processing time for financial attribution without discussion",
+    "Dropping raw events after aggregation",
+    "Ignoring late corrections and billing finalization",
+    "Partitioning solely by campaign when a campaign can be extremely hot"
+  ],
+  "seniorSignal": "Connect streaming semantics to financial correctness. Explain event time, finalization, append-only adjustments, replay lineage, and the exact boundary of dedupe/transactions.",
+  "implementation": [
+    "Kafka with schema registry and immutable object-store archive",
+    "Flink/Kafka Streams event-time windows, checkpoints, and keyed state",
+    "ClickHouse/Druid/Pinot aggregate serving store",
+    "Batch reconciliation job and append-only billing adjustment ledger"
+  ],
+  "related": [
+    2,
+    7,
+    19,
+    20,
+    26,
+    27,
+    28
+  ],
+  "tags": [
+    "streaming",
+    "event time",
+    "watermark",
+    "dedupe",
+    "reconciliation",
+    "OLAP"
+  ],
+  "repoTitle": "Ad Click Event Aggregation",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/21.%20Ad%20Click%20Event%20Aggregation"
+}
