@@ -1,0 +1,201 @@
+{
+  "id": 19,
+  "title": "Distributed Message Queue",
+  "category": "Storage & Messaging",
+  "kind": "Design Case",
+  "difficulty": "Expert",
+  "time": 60,
+  "oneLine": "Partition an append-only log, replicate each partition with a leader and followers, let consumer groups own partitions, and make semantics explicit through offsets and idempotency.",
+  "opening": "I would model each topic as multiple ordered partitions. Producers select a partition by key when per-entity ordering is required, or round-robin for balance. The partition leader appends batches to immutable log segments and replicates to followers; acknowledgment policy trades latency against durability. Consumers pull, maintain offsets, and join groups where each partition is owned by at most one consumer in a group, giving parallelism while preserving order within that partition. A coordinator manages heartbeats and rebalances. Metadata and leader epochs live in a consensus-backed control plane. The service is naturally at-least-once; exactly-once business effects require idempotent producers, transactional offset/output commits where supported, and an idempotent or transactional sink. Retention and replay are first-class, unlike a transient task queue.",
+  "ask": [
+    "Task queue, pub/sub log, or both?",
+    "What ordering scope and delivery semantics are required?",
+    "Retention/replay and maximum message size?",
+    "Throughput, partitions, regions, and acceptable data loss/latency?"
+  ],
+  "requirements": {
+    "functional": [
+      "Publish/consume",
+      "Topics/partitions",
+      "Consumer groups",
+      "Retention/replay",
+      "Retries/DLQ"
+    ],
+    "nonFunctional": [
+      "High throughput",
+      "Durability",
+      "Ordered partitions",
+      "Horizontal scale",
+      "Backpressure and observability"
+    ]
+  },
+  "scale": [
+    "Partition count sets maximum ordered-consumer parallelism; changing it can alter key-to-partition mapping.",
+    "Batch size improves throughput but adds latency and memory pressure.",
+    "Disk bandwidth and page cache are usually more important than random IOPS because writes/reads are sequential."
+  ],
+  "flows": [
+    {
+      "name": "Produce",
+      "nodes": [
+        "Producer",
+        "Partitioner",
+        "Leader broker",
+        "Append segment",
+        "Follower replication",
+        "ACK policy"
+      ]
+    },
+    {
+      "name": "Consume",
+      "nodes": [
+        "Group coordinator",
+        "Partition assignment",
+        "Consumer pull",
+        "Process",
+        "Commit offset",
+        "Lag metric"
+      ]
+    },
+    {
+      "name": "Control plane",
+      "nodes": [
+        "Broker membership",
+        "Metadata consensus",
+        "Leader election",
+        "ISR/epoch",
+        "Rebalance"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Partitioning",
+      "default": "Key by entity when ordering matters; otherwise balanced round-robin/sticky batches.",
+      "why": "Ordering exists only within a partition and hot keys can cap throughput.",
+      "switch": "Use more granular subkeys plus downstream reconciliation when one entity is too hot."
+    },
+    {
+      "topic": "Acknowledgment",
+      "default": "ACK after leader plus sufficient in-sync replicas for durable business events.",
+      "why": "Leader-only ACK can lose acknowledged data on failover.",
+      "switch": "ACK leader or no ACK for telemetry where small loss is acceptable and latency dominates."
+    },
+    {
+      "topic": "Consumer semantics",
+      "default": "At-least-once with idempotent processing and explicit offset ownership.",
+      "why": "Crashes between side effect and offset commit cause redelivery.",
+      "switch": "At-most-once for expendable metrics; transactional consume-transform-produce where broker supports it."
+    },
+    {
+      "topic": "Push or pull",
+      "default": "Consumer pull with long polling and byte/count limits.",
+      "why": "Consumers control pace and backpressure; batching is efficient.",
+      "switch": "Push gateways can adapt a log to webhook clients but must preserve retry/flow control."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Log storage",
+      "points": [
+        "Append immutable records to segment files with sparse indexes and checksums.",
+        "Delete or compact whole segments by retention/compaction policy.",
+        "Use zero-copy/page cache and sequential batch I/O for throughput."
+      ]
+    },
+    {
+      "title": "Rebalance",
+      "points": [
+        "Heartbeats detect failed consumers; coordinator advances group generation and reassigns partitions.",
+        "Cooperative/sticky rebalance reduces stop-the-world movement.",
+        "Fence old owners so two consumers cannot commit the same partition generation."
+      ]
+    },
+    {
+      "title": "Exactly-once nuance",
+      "points": [
+        "Idempotent producer prevents duplicate appends from retries.",
+        "Broker transaction can atomically commit produced records and consumed offsets inside the broker.",
+        "External DB/API side effects still need idempotency, outbox/inbox, or a transaction bridge."
+      ]
+    },
+    {
+      "title": "Delayed/retry messages",
+      "points": [
+        "Do not repeatedly block a hot ordered partition on one poison record.",
+        "Use retry topics/time buckets or a timing wheel and preserve original key/attempt metadata.",
+        "Define when ordering is more important than progress."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Leader fails after partial replication",
+      "response": "Elect only an in-sync follower, use leader epochs, truncate divergent tails, and choose unclean election policy explicitly."
+    },
+    {
+      "risk": "Consumer reprocesses a message",
+      "response": "Idempotency key/inbox table, transactional sink, and commit offset only after durable business effect."
+    },
+    {
+      "risk": "Hot partition",
+      "response": "Better key distribution, isolate hot entity, split workload semantics, and monitor per-partition bytes/lag."
+    },
+    {
+      "risk": "Disk fills or consumer falls behind retention",
+      "response": "Quotas, tiered storage, lag alerts, backpressure, and an explicit reset/recovery workflow."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Can adding partitions break ordering?",
+      "a": "Existing records remain ordered within old partitions, but a hash modulo partition count may route the same key to a new partition. Use stable partition mapping, key-range migration, or accept a cutover epoch."
+    },
+    {
+      "q": "What does exactly once mean here?",
+      "a": "Be explicit about boundary. The broker can avoid duplicate records and atomically move offsets with output, but an external payment or database write still needs its own idempotency or transaction design."
+    },
+    {
+      "q": "Why does Kafka-like storage retain messages after consumption?",
+      "a": "Consumer progress is an offset, not record deletion. Independent groups can replay at their own pace, and retention is time/size/compaction based."
+    },
+    {
+      "q": "How do you choose partition count?",
+      "a": "From peak throughput per partition, desired consumer parallelism, future growth, and metadata/recovery cost. Overpartition modestly, but thousands of tiny partitions also have operational cost."
+    }
+  ],
+  "mistakes": [
+    "Claiming global order across partitions",
+    "Calling broker transactions end-to-end exactly once",
+    "Committing offset before side effect for at-least-once workflows",
+    "Ignoring consumer lag and retention exhaustion"
+  ],
+  "seniorSignal": "Define ordering and exactly-once boundaries precisely. Discuss leader epochs, rebalances, fencing, hot partitions, retention, and sink idempotency—not only Kafka terminology.",
+  "implementation": [
+    "Kafka/Pulsar concepts: append logs, partitions, ISR, groups, offsets",
+    "Spring Kafka with idempotent producer and manual/transactional offset control",
+    "Inbox/outbox tables for external database effects",
+    "Per-partition lag, under-replicated partition, disk, and rebalance telemetry"
+  ],
+  "related": [
+    5,
+    6,
+    7,
+    10,
+    12,
+    20,
+    21,
+    27,
+    28
+  ],
+  "tags": [
+    "Kafka",
+    "partition",
+    "consumer group",
+    "offset",
+    "replication",
+    "exactly-once"
+  ],
+  "repoTitle": "Distributed Message Queue",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/19.%20Distributed%20Message%20Queue"
+}
