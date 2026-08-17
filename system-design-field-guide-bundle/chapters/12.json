@@ -1,0 +1,179 @@
+{
+  "id": 12,
+  "title": "Chat System",
+  "category": "Consumer Systems",
+  "kind": "Design Case",
+  "difficulty": "Advanced",
+  "time": 55,
+  "oneLine": "Keep long-lived WebSockets at the edge, assign each conversation an ordered write path, persist messages before acknowledgement, and synchronize devices with cursors.",
+  "opening": "I would use HTTP for account, history, and media APIs, and WebSockets for bidirectional real-time messaging and presence. A connection gateway authenticates the user and registers active devices with service discovery. A chat service routes each conversation to an owning partition/sequencer so message order is defined per conversation, assigns a server message ID, persists the message to a write-optimized store, and only then acknowledges acceptance. Delivery to online devices is asynchronous and at least once; clients deduplicate by message ID and send delivered/read acknowledgements. Offline devices catch up using a per-user or per-conversation cursor. Group membership is versioned, attachments go to object storage, and presence is soft state with heartbeat TTL rather than a strongly consistent database record.",
+  "ask": [
+    "One-to-one, groups, or both—and maximum group size?",
+    "Which states are required: sent, delivered, read, typing, presence?",
+    "What ordering guarantee is required across conversations and devices?",
+    "How long is history retained and is end-to-end encryption required?"
+  ],
+  "requirements": {
+    "functional": [
+      "Send/receive messages",
+      "Multi-device sync",
+      "Group membership",
+      "Presence/read receipts",
+      "Media attachments"
+    ],
+    "nonFunctional": [
+      "Low latency",
+      "Per-conversation ordering",
+      "Durability",
+      "High connection scale",
+      "Privacy/security"
+    ]
+  },
+  "scale": [
+    "Connection count and heartbeat traffic often dominate gateway capacity even when message QPS is moderate.",
+    "Ordering should normally be per conversation, not global; this enables partitioning.",
+    "Separate stored-message durability from online delivery attempts and ephemeral presence."
+  ],
+  "flows": [
+    {
+      "name": "Send",
+      "nodes": [
+        "Sender device",
+        "WebSocket gateway",
+        "Chat router",
+        "Conversation sequencer",
+        "Message store",
+        "ACK sender"
+      ]
+    },
+    {
+      "name": "Deliver/sync",
+      "nodes": [
+        "Message event",
+        "Recipient device registry",
+        "Online gateways",
+        "Client dedupe + ACK",
+        "Offline cursor sync"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Transport",
+      "default": "WebSocket for real-time messaging; HTTP for history/media/control.",
+      "why": "WebSocket supports server push with fewer polling connections.",
+      "switch": "Long polling for constrained environments; SSE for server-only streams."
+    },
+    {
+      "topic": "Ordering",
+      "default": "Single ordered log/owner per conversation partition with stable message IDs.",
+      "why": "Global ordering is expensive and unnecessary; client timestamps are untrusted.",
+      "switch": "Large groups can split delivery fanout while preserving one ordered message log."
+    },
+    {
+      "topic": "Delivery semantics",
+      "default": "Persist-before-ack and at-least-once delivery with client/server dedupe.",
+      "why": "Exactly-once network delivery is not realistic across disconnects and retries.",
+      "switch": "Use transactional local state to make message creation exactly once within the service boundary."
+    },
+    {
+      "topic": "Presence",
+      "default": "Ephemeral TTL state and pub/sub, with privacy controls.",
+      "why": "Presence changes rapidly and temporary staleness is acceptable.",
+      "switch": "Store durable last-seen separately if product policy permits."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Multi-device sync",
+      "points": [
+        "Track a monotonic cursor per inbox/conversation.",
+        "A reconnect requests messages after the last acknowledged cursor.",
+        "Read state merges monotonically across devices and arrives out of order safely."
+      ]
+    },
+    {
+      "title": "Large groups",
+      "points": [
+        "Persist one message, then fan out references/notifications.",
+        "Use membership version at send time and define semantics for concurrent joins/leaves.",
+        "Partition delivery workers and protect against whale groups."
+      ]
+    },
+    {
+      "title": "Connection draining",
+      "points": [
+        "Mark gateway draining, stop new connections, update registry, and let clients reconnect with jitter.",
+        "Do not lose messages because delivery is replayed from durable storage.",
+        "Keep heartbeat intervals adaptive to mobile/network constraints."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Client retries after lost ACK",
+      "response": "Client-generated idempotency ID plus server message ID; conditional creation returns existing result."
+    },
+    {
+      "risk": "Gateway dies with active sockets",
+      "response": "Connections re-establish elsewhere; durable messages sync from cursor; device registry expires by TTL."
+    },
+    {
+      "risk": "Out-of-order delivery",
+      "response": "Per-conversation sequence IDs, client buffering/gap detection, and history fetch for missing range."
+    },
+    {
+      "risk": "Group fanout overload",
+      "response": "Asynchronous partitioned delivery, bounded notification policy, and dedicated handling for whale groups."
+    }
+  ],
+  "questions": [
+    {
+      "q": "How do you guarantee message ordering?",
+      "a": "Define it per conversation, route writes through one logical sequencer/leader for that conversation, and assign server sequence IDs. Delivery can be parallel as long as clients reorder/detect gaps."
+    },
+    {
+      "q": "How do read receipts work with multiple devices?",
+      "a": "Store a monotonic read cursor per user/conversation—the maximum message sequence seen. Device updates are idempotent max operations, then propagated asynchronously."
+    },
+    {
+      "q": "Where are attachments stored?",
+      "a": "Clients upload through presigned URLs to object storage; the chat message contains immutable metadata and object reference. Scan/process asynchronously before broad delivery."
+    },
+    {
+      "q": "How would end-to-end encryption change the design?",
+      "a": "Servers route encrypted envelopes and cannot inspect content for search/moderation. Key distribution, device identity, group key rotation, backup, and abuse-reporting become central design problems."
+    }
+  ],
+  "mistakes": [
+    "Claiming global ordering",
+    "Acknowledging before durable persistence",
+    "Using presence as authoritative security state",
+    "Assuming exactly-once delivery over WebSockets"
+  ],
+  "seniorSignal": "Separate durable creation, real-time delivery, device synchronization, and ephemeral presence. Be precise about the scope of ordering and acknowledgement semantics.",
+  "implementation": [
+    "Netty/Spring WebFlux or .NET async sockets for gateways",
+    "Kafka/Pulsar or a sharded log for conversation ordering",
+    "Cassandra/Scylla-style message store keyed by conversation and time",
+    "Redis TTL registry/presence; object storage for media"
+  ],
+  "related": [
+    7,
+    10,
+    11,
+    17,
+    19,
+    24
+  ],
+  "tags": [
+    "WebSocket",
+    "ordering",
+    "presence",
+    "multi-device",
+    "delivery",
+    "cursor"
+  ],
+  "repoTitle": "Chat System",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/12.%20Chat%20System"
+}
