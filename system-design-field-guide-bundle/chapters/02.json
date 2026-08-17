@@ -1,0 +1,155 @@
+{
+  "id": 2,
+  "title": "Back-of-the-Envelope Estimation",
+  "category": "Foundations",
+  "kind": "Foundation",
+  "difficulty": "Core",
+  "time": 20,
+  "oneLine": "Turn vague scale into a few defensible numbers: peak QPS, storage growth, bandwidth, cache size, partitions, and headroom.",
+  "opening": "Before choosing technology, I would translate the product assumptions into order-of-magnitude capacity. I will state every assumption, round numbers deliberately, and calculate average QPS, peak QPS, write volume, storage growth, network throughput, and likely cache working set. I am not trying to predict production exactly; I am checking whether the design needs one machine, tens of machines, or a globally partitioned system. I would then use those estimates to justify the number of partitions, database choice, queue throughput, and retention tiers, and I would call out the two or three assumptions to validate with real measurements.",
+  "ask": [
+    "How many daily/monthly active users?",
+    "How many actions per user per day and what is the read/write split?",
+    "What is the average and p95 payload size?",
+    "What peak multiplier and retention period should we design for?"
+  ],
+  "requirements": {
+    "functional": [
+      "Estimate traffic",
+      "Estimate storage",
+      "Estimate bandwidth and memory"
+    ],
+    "nonFunctional": [
+      "Transparent assumptions",
+      "Correct units",
+      "Order-of-magnitude accuracy",
+      "Capacity headroom"
+    ]
+  },
+  "scale": [
+    "Average QPS = daily operations ÷ 86,400.",
+    "Peak QPS = average QPS × an explicit peak factor.",
+    "Storage/year = writes/sec × bytes/write × 31.5M seconds × replication factor.",
+    "Bandwidth = requests/sec × bytes/request; calculate ingress and egress separately.",
+    "Cache target = hot-object count × bytes/object × overhead, not the whole database."
+  ],
+  "flows": [
+    {
+      "name": "Estimation workflow",
+      "nodes": [
+        "Clarify assumptions",
+        "Average QPS",
+        "Peak QPS",
+        "Data per event",
+        "Storage + bandwidth",
+        "Partitions + headroom",
+        "Validate sensitivities"
+      ]
+    }
+  ],
+  "decisions": [
+    {
+      "topic": "Precision",
+      "default": "Use one or two significant digits and powers of ten.",
+      "why": "Interview estimates are for architecture classification, not a finance forecast.",
+      "switch": "Use exact values only when checking a hard protocol or bit-allocation boundary."
+    },
+    {
+      "topic": "Average versus peak",
+      "default": "Design critical paths for peak and long-running storage for average plus growth.",
+      "why": "Daily averages hide open-of-market, celebrity, launch, and regional spikes.",
+      "switch": "Use burst queues when the business allows deferred processing instead of provisioning every worker for instantaneous peak."
+    },
+    {
+      "topic": "Replication overhead",
+      "default": "Include copies, indexes, metadata, and encoding overhead.",
+      "why": "Logical payload size can understate physical storage by several times.",
+      "switch": "For rough first pass, state a 2–4× multiplier and refine only if the design hinges on it."
+    }
+  ],
+  "deepDives": [
+    {
+      "title": "Useful mental constants",
+      "points": [
+        "A day is about 10^5 seconds; a year about 3×10^7 seconds.",
+        "1 KB × 1M events is roughly 1 GB; 1 KB × 1B events is roughly 1 TB.",
+        "Network and storage units may use decimal while memory often uses binary; say which approximation you use."
+      ]
+    },
+    {
+      "title": "Sensitivity analysis",
+      "points": [
+        "Show what changes if payload grows 10× or peak grows 5×.",
+        "Identify the dominant term rather than refining insignificant ones.",
+        "Use a range when the product assumption is genuinely uncertain."
+      ]
+    }
+  ],
+  "failures": [
+    {
+      "risk": "Forgetting peak traffic",
+      "response": "Calculate average and at least one peak scenario; name the product event that creates the peak."
+    },
+    {
+      "risk": "Ignoring indexes and replicas",
+      "response": "Apply an explicit physical-storage multiplier and state what it covers."
+    },
+    {
+      "risk": "Confusing bits and bytes",
+      "response": "Write units beside every number and convert once, visibly."
+    },
+    {
+      "risk": "False precision",
+      "response": "Round early and give a range; say which assumption matters most."
+    }
+  ],
+  "questions": [
+    {
+      "q": "How many servers do we need?",
+      "a": "First estimate peak work and define a safe per-instance capacity from load tests, then divide and add N+1/AZ-failure headroom. CPU is only one constraint; include memory, connection pools, and downstream limits."
+    },
+    {
+      "q": "How much cache is enough?",
+      "a": "Estimate the working set, not the full dataset. Start with the objects responsible for perhaps 80–95% of reads, include Redis/object overhead, and confirm with hit-rate curves in production."
+    },
+    {
+      "q": "What if the estimate is wrong?",
+      "a": "Design for observability and elastic partitioning. The purpose of the estimate is to avoid a category error; runtime metrics and load tests replace assumptions as soon as the system exists."
+    },
+    {
+      "q": "How do estimates influence database choice?",
+      "a": "They expose write rate, data volume, access pattern, retention, and consistency needs. Those decide whether one relational primary is enough, whether partitioning is required, and whether a log/column/time-series store fits better."
+    }
+  ],
+  "mistakes": [
+    "Starting arithmetic before clarifying product behavior",
+    "Reporting only average QPS",
+    "Choosing a database from user count alone",
+    "Spending ten minutes optimizing a number that cannot change the architecture"
+  ],
+  "seniorSignal": "Use the estimate to make a decision: ‘This fits one primary,’ ‘we need 32 partitions,’ or ‘egress dominates cost.’ Numbers without a design consequence are noise.",
+  "implementation": [
+    "Use the built-in calculator on this site during practice",
+    "Turn assumptions into load-test scenarios and per-instance SLOs",
+    "Capture real p95 payloads and peak multipliers once telemetry exists"
+  ],
+  "related": [
+    1,
+    3,
+    14,
+    19,
+    20,
+    21,
+    28
+  ],
+  "tags": [
+    "capacity",
+    "QPS",
+    "storage",
+    "bandwidth",
+    "latency",
+    "availability"
+  ],
+  "repoTitle": "Back Of the Envelope Estimation",
+  "source": "https://github.com/liquidslr/system-design-notes/tree/main/02.%20Back%20Of%20the%20Envelope%20Estimation"
+}
