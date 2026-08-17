@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="description" content="An interactive interview field guide covering all 28 cases from liquidslr/system-design-notes." />
+  <meta name="theme-color" content="#0a0c12" />
+  <title>System Design Field Guide</title>
+  <link rel="stylesheet" href="/api/assets/styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell" aria-busy="true">
+    <header class="topbar">
+      <button class="icon-btn mobile-only" id="menuBtn" aria-label="Open curriculum">☰</button>
+      <a class="brand" href="#" data-action="home" aria-label="System Design Field Guide home">
+        <span class="brand-mark">SD</span>
+        <span><strong>System Design</strong><small>Interview Field Guide</small></span>
+      </a>
+      <nav class="mode-tabs" aria-label="Learning mode">
+        <button data-mode="learn" class="active">Learn</button>
+        <button data-mode="interview">Interview</button>
+        <button data-mode="review">Rapid review</button>
+        <button data-mode="mock">Mock</button>
+      </nav>
+      <div class="top-actions">
+        <button class="icon-btn" id="calcBtn" title="Capacity calculator" aria-label="Open capacity calculator">∑</button>
+        <button class="icon-btn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+        <button class="coach-btn" id="coachBtn"><span>✦</span> Coach</button>
+      </div>
+    </header>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <label class="search-box">
+          <span>⌕</span>
+          <input id="searchInput" type="search" placeholder="Search 28 cases…" autocomplete="off" />
+          <kbd>/</kbd>
+        </label>
+        <div id="categoryFilters" class="filter-row" aria-label="Filter by category"></div>
+      </div>
+      <div class="progress-panel">
+        <div><span>Curriculum progress</span><strong id="progressText">0 / 28</strong></div>
+        <div class="progress-track"><i id="progressBar"></i></div>
+      </div>
+      <div id="chapterList" class="chapter-list" aria-label="Curriculum"></div>
+      <footer class="sidebar-foot">
+        <span>28 / 28 repository cases</span>
+        <button data-action="reset-progress">Reset progress</button>
+      </footer>
+    </aside>
+
+    <main class="main" id="main">
+      <div class="loading-card">
+        <span class="spinner"></span>
+        <h1>Loading the complete field guide</h1>
+        <p>Preparing all 28 interview cases, diagrams, trade-offs and follow-ups…</p>
+      </div>
+    </main>
+  </div>
+
+  <div class="scrim" id="scrim"></div>
+
+  <section class="drawer coach-drawer" id="coachDrawer" aria-label="System Design Coach" aria-hidden="true">
+    <header>
+      <div><span class="coach-orb">✦</span><div><strong>System Design Coach</strong><small id="coachStatus">Context-aware local coach</small></div></div>
+      <button class="icon-btn" data-close="coach" aria-label="Close coach">×</button>
+    </header>
+    <div class="coach-context" id="coachContext"></div>
+    <div class="coach-messages" id="coachMessages" aria-live="polite"></div>
+    <div class="coach-suggestions" id="coachSuggestions"></div>
+    <form class="coach-form" id="coachForm">
+      <textarea id="coachInput" rows="2" placeholder="Ask for a simple explanation, critique, trade-off, or mock question…"></textarea>
+      <button type="submit" aria-label="Send to coach">➤</button>
+    </form>
+    <p class="coach-foot">Uses the built-in coach automatically. A hosted GPT tutor activates when an API key is configured on Vercel.</p>
+  </section>
+
+  <dialog id="calculatorDialog" class="modal calculator-modal">
+    <form method="dialog" class="modal-head"><div><strong>Capacity calculator</strong><small>Turn assumptions into architecture</small></div><button class="icon-btn" value="close">×</button></form>
+    <div class="calc-grid">
+      <label>Daily active users<input id="calcDau" type="number" min="0" value="10000000" /></label>
+      <label>Actions / user / day<input id="calcActions" type="number" min="0" step="0.1" value="10" /></label>
+      <label>Peak multiplier<input id="calcPeak" type="number" min="1" step="0.1" value="5" /></label>
+      <label>Write percentage<input id="calcWrite" type="number" min="0" max="100" value="10" /></label>
+      <label>Average payload (KB)<input id="calcPayload" type="number" min="0" step="0.1" value="2" /></label>
+      <label>Retention (days)<input id="calcRetention" type="number" min="0" value="365" /></label>
+      <label>Replication factor<input id="calcReplication" type="number" min="1" value="3" /></label>
+      <label>Safe QPS / instance<input id="calcInstance" type="number" min="1" value="1000" /></label>
+    </div>
+    <div id="calcResults" class="calc-results"></div>
+    <p class="modal-note">Order-of-magnitude estimates only. Add index, metadata, compression, retry and growth factors explicitly in an interview.</p>
+  </dialog>
+
+  <template id="toastTemplate"><div class="toast"></div></template>
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/api/assets/app.js" defer></script>
+</body>
+</html>
